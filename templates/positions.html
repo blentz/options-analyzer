@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Positions - Options Trading Analyzer{% endblock %}
+
+{% block content %}
+<h1>Options Positions</h1>
+
+<div class="filter-bar">
+    <a href="/positions" class="btn {% if not show_closed_only and not show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">All Positions</a>
+    <a href="/positions?open=true" class="btn {% if show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">Open Only</a>
+    <a href="/positions?closed=true" class="btn {% if show_closed_only %}btn-primary{% else %}btn-secondary{% endif %}">Closed Only</a>
+</div>
+
+{% if positions %}
+<table>
+    <thead>
+        <tr>
+            <th>Symbol</th>
+            <th>Contract</th>
+            <th>Strategy</th>
+            <th>Open Date</th>
+            <th>Close Date</th>
+            <th>Outcome</th>
+            <th>Options P&L</th>
+            <th>Stock P&L</th>
+            <th>Total P&L</th>
+            <th>Result</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for p in positions %}
+        <tr>
+            <td><strong>{{ p.symbol }}</strong></td>
+            <td>{{ p.expiration }} ${{ p.strike }} {{ p.option_type }}</td>
+            <td>{{ p.strategy }}</td>
+            <td>{{ p.open_date }}</td>
+            <td>{{ p.close_date or '-' }}</td>
+            <td>
+                <span class="tag {{ p.outcome.lower() }}">{{ p.outcome }}</span>
+            </td>
+            <td class="money {% if p.net_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "{:,.2f}".format(p.net_pnl) }}
+            </td>
+            <td class="money {% if p.underlying_pnl >= 0 %}positive{% elif p.underlying_pnl < 0 %}negative{% endif %}">
+                {% if p.underlying_pnl != 0 %}
+                ${{ "{:,.2f}".format(p.underlying_pnl) }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
+            <td class="money {% if p.total_pnl >= 0 %}positive{% else %}negative{% endif %}" style="font-weight: 600;">
+                ${{ "{:,.2f}".format(p.total_pnl) }}
+            </td>
+            <td>
+                {% if p.is_closed %}
+                    {% if p.is_winner %}
+                        <span class="tag winner">WIN</span>
+                    {% else %}
+                        <span class="tag loser">LOSS</span>
+                    {% endif %}
+                {% else %}
+                    <span class="tag open">OPEN</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="alert alert-info" style="background-color: #252525; border-color: #444; color: #888;">
+    No positions found. <a href="/import" style="color: #22c55e;">Import a CSV file</a> to get started.
+</div>
+{% endif %}
+{% endblock %}

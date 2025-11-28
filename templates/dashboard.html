@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Options Trading Analyzer{% endblock %}
+
+{% block content %}
+<h1>Trading Performance Dashboard</h1>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">Total P&L</div>
+        <div class="value {% if stats.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(stats.total_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Options P&L</div>
+        <div class="value {% if stats.options_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(stats.options_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Underlying P&L</div>
+        <div class="value {% if stats.underlying_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(stats.underlying_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Win Rate</div>
+        <div class="value {% if stats.win_rate >= 50 %}positive{% else %}negative{% endif %}">
+            {{ "{:.1f}".format(stats.win_rate) }}%
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Closed Positions</div>
+        <div class="value">{{ stats.closed_positions }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Open Positions</div>
+        <div class="value">{{ stats.open_positions }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Winners / Losers</div>
+        <div class="value">{{ stats.winners }} / {{ stats.losers }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Total Commissions</div>
+        <div class="value">${{ "{:,.2f}".format(stats.total_commissions) }}</div>
+    </div>
+</div>
+
+<div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+    <div class="stat-card">
+        <div class="label">Expired</div>
+        <div class="value">{{ stats.expired }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Assigned</div>
+        <div class="value">{{ stats.assigned }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Closed Early</div>
+        <div class="value">{{ stats.closed_early }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Short Puts</div>
+        <div class="value">{{ stats.short_puts }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Short Calls</div>
+        <div class="value">{{ stats.short_calls }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Long Puts</div>
+        <div class="value">{{ stats.long_puts }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Long Calls</div>
+        <div class="value">{{ stats.long_calls }}</div>
+    </div>
+</div>
+
+<div class="charts-grid">
+    <div class="chart-container full-width">
+        {{ cumulative_script | safe }}
+        {{ cumulative_div | safe }}
+    </div>
+
+    <div class="chart-container">
+        {{ monthly_script | safe }}
+        {{ monthly_div | safe }}
+    </div>
+
+    <div class="chart-container">
+        {{ symbol_script | safe }}
+        {{ symbol_div | safe }}
+    </div>
+
+    <div class="chart-container">
+        {{ winloss_script | safe }}
+        {{ winloss_div | safe }}
+    </div>
+
+    <div class="chart-container">
+        {{ strategy_script | safe }}
+        {{ strategy_div | safe }}
+    </div>
+</div>
+{% endblock %}

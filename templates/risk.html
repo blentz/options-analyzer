@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Risk Analysis - Options Trading Analyzer{% endblock %}
+
+{% block content %}
+<h1>Open Positions Risk Analysis</h1>
+
+{% if risk_summary.total_positions == 0 %}
+<div class="alert" style="background-color: #252525; border: 1px solid #444; padding: 1.5rem; border-radius: 8px;">
+    <p style="color: #888; margin: 0;">No open positions to analyze.</p>
+    <p style="color: #666; margin-top: 0.5rem; font-size: 0.9rem;">
+        Import trades with open positions to see risk analysis.
+    </p>
+</div>
+{% else %}
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">Open Positions</div>
+        <div class="value">{{ risk_summary.total_positions }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Current P&L (at market)</div>
+        <div class="value {% if risk_summary.total_current_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(risk_summary.total_current_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Total Premium Received</div>
+        <div class="value positive">${{ "{:,.2f}".format(risk_summary.total_premium) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Max Potential Profit</div>
+        <div class="value positive">${{ "{:,.2f}".format(risk_summary.total_max_profit) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Max Potential Loss</div>
+        <div class="value negative">${{ "{:,.2f}".format(risk_summary.total_max_loss) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Positions ITM</div>
+        <div class="value {% if risk_summary.positions_itm > 0 %}warning{% endif %}">
+            {{ risk_summary.positions_itm }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Expiring Within 7 Days</div>
+        <div class="value {% if risk_summary.positions_expiring_soon > 0 %}warning{% endif %}">
+            {{ risk_summary.positions_expiring_soon }}
+        </div>
+    </div>
+</div>
+
+<h2>Portfolio Risk Overview</h2>
+<p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+    Shows how each position's P&L changes with underlying price movement (% from strike).
+    Click legend items to toggle visibility.
+</p>
+
+<div class="chart-container full-width">
+    {{ combined_script | safe }}
+    {{ combined_div | safe }}
+</div>
+
+<h2 style="margin-top: 2rem;">Risk Profile Summary</h2>
+<p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+    Max profit (green) and max loss (red) for each position. Blue dot shows premium received.
+</p>
+
+<div class="chart-container">
+    {{ summary_script | safe }}
+    {{ summary_div | safe }}
+</div>
+
+<h2 style="margin-top: 2rem;">Individual Position Payoff Diagrams</h2>
+<p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+    P&L at expiration based on underlying price. Orange line = strike price, purple line = breakeven.
+</p>
+
+<div class="charts-grid">
+    {% for item in position_charts %}
+    <div class="chart-container">
+        <div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span class="tag {% if item.analysis.option_type == 'PUT' %}assigned{% else %}expired{% endif %}">
+                    {{ item.analysis.strategy }}
+                </span>
+                <span style="color: #888; font-size: 0.85rem; margin-left: 0.5rem;">
+                    {{ item.analysis.quantity }} contract(s) •
+                    {{ item.analysis.days_to_expiry }}d to expiry
+                </span>
+            </div>
+            {% if item.analysis.current_price %}
+            <div style="text-align: right;">
+                <span style="color: #22d3ee; font-weight: 600; font-size: 1.1rem;">
+                    ${{ "{:.2f}".format(item.analysis.current_price) }}
+                </span>
+                {% if item.analysis.price_change_percent is not none %}
+                <span style="font-size: 0.85rem; margin-left: 0.25rem;" class="{% if item.analysis.price_change >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if item.analysis.price_change >= 0 %}+{% endif %}{{ "{:.2f}".format(item.analysis.price_change_percent) }}%
+                </span>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {{ item.script | safe }}
+        {{ item.div | safe }}
+        <div style="margin-top: 0.75rem; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; font-size: 0.85rem;">
+            <div>
+                <span style="color: #666;">Premium:</span>
+                <span class="money positive">${{ "{:,.2f}".format(item.analysis.premium_received) }}</span>
+            </div>
+            <div>
+                <span style="color: #666;">Breakeven:</span>
+                <span style="color: #a855f7;">${{ "{:.2f}".format(item.analysis.breakeven) }}</span>
+            </div>
+            <div>
+                <span style="color: #666;">Current P&L:</span>
+                {% if item.analysis.current_pnl is not none %}
+                <span class="money {% if item.analysis.current_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    ${{ "{:,.2f}".format(item.analysis.current_pnl) }}
+                </span>
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </div>
+            <div>
+                <span style="color: #666;">Status:</span>
+                {% if item.analysis.itm is not none %}
+                    {% if item.analysis.itm %}
+                    <span style="color: #ef4444; font-weight: 600;">ITM</span>
+                    {% else %}
+                    <span style="color: #22c55e;">OTM</span>
+                    {% endif %}
+                    <span style="color: #888; font-size: 0.8rem;">
+                        ({{ "{:.1f}".format(item.analysis.distance_to_strike_pct) }}%)
+                    </span>
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<h2 style="margin-top: 2rem;">Position Details</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Symbol</th>
+            <th>Contract</th>
+            <th>Strategy</th>
+            <th>Expiration</th>
+            <th>Days Left</th>
+            <th>Current Price</th>
+            <th>Status</th>
+            <th>Current P&L</th>
+            <th>Premium</th>
+            <th>Breakeven</th>
+            <th>Max Profit</th>
+            <th>Max Loss</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for a in risk_summary.analyses %}
+        <tr>
+            <td><strong>{{ a.symbol }}</strong></td>
+            <td>${{ a.strike }} {{ a.option_type }}</td>
+            <td>
+                <span class="tag {% if 'PUT' in a.strategy %}assigned{% else %}expired{% endif %}">
+                    {{ a.strategy }}
+                </span>
+            </td>
+            <td>{{ a.expiration.strftime('%m/%d/%y') }}</td>
+            <td>
+                {% if a.days_to_expiry <= 7 %}
+                <span style="color: #f59e0b; font-weight: 600;">{{ a.days_to_expiry }}d</span>
+                {% else %}
+                {{ a.days_to_expiry }}d
+                {% endif %}
+            </td>
+            <td>
+                {% if a.current_price is not none %}
+                <span style="color: #22d3ee; font-weight: 600;">${{ "{:.2f}".format(a.current_price) }}</span>
+                {% if a.price_change_percent is not none %}
+                <br><span style="font-size: 0.8rem;" class="{% if a.price_change >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if a.price_change >= 0 %}+{% endif %}{{ "{:.2f}".format(a.price_change_percent) }}%
+                </span>
+                {% endif %}
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if a.itm is not none %}
+                    {% if a.itm %}
+                    <span style="color: #ef4444; font-weight: 600;">ITM</span>
+                    {% else %}
+                    <span style="color: #22c55e;">OTM</span>
+                    {% endif %}
+                    <br><span style="color: #888; font-size: 0.8rem;">{{ "{:.1f}".format(a.distance_to_strike_pct) }}%</span>
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if a.current_pnl is not none %}
+                <span class="money {% if a.current_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    ${{ "{:,.2f}".format(a.current_pnl) }}
+                </span>
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </td>
+            <td class="money positive">${{ "{:,.2f}".format(a.premium_received) }}</td>
+            <td style="color: #a855f7;">${{ "{:.2f}".format(a.breakeven) }}</td>
+            <td class="money positive">${{ "{:,.2f}".format(a.max_profit) }}</td>
+            <td class="money negative">
+                {% if a.max_loss < -500000 %}
+                Unlimited
+                {% else %}
+                ${{ "{:,.2f}".format(a.max_loss) }}
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% endif %}
+{% endblock %}

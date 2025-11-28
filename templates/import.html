@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Import - Options Trading Analyzer{% endblock %}
+
+{% block content %}
+<h1>Import Fidelity CSV</h1>
+
+{% if results %}
+<div class="import-results" style="margin-bottom: 1.5rem;">
+    {% for result in results %}
+    <div class="alert {% if result.success %}alert-success{% else %}alert-error{% endif %}" style="margin-bottom: 0.5rem;">
+        <strong>{{ result.filename }}:</strong>
+        {% if result.success %}
+            Imported {{ result.imported }} trades{% if result.skipped > 0 %} ({{ result.skipped }} duplicates skipped){% endif %}
+        {% else %}
+            {{ result.error }}
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% if summary %}
+    <div class="alert" style="background-color: #1a3a1a; border-color: #22c55e; margin-top: 1rem;">
+        <strong>Total:</strong> {{ summary.total_imported }} trades imported from {{ summary.files_processed }} files
+        {% if summary.total_skipped > 0 %} ({{ summary.total_skipped }} duplicates skipped){% endif %}
+        {% if summary.files_failed > 0 %} | {{ summary.files_failed }} files failed{% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div style="max-width: 600px;">
+    <p style="color: #888; margin-bottom: 1.5rem;">
+        Upload one or more CSV files exported from Fidelity's Account History.
+        Go to Fidelity.com → Accounts → Activity & Orders → History → Download.
+    </p>
+
+    <form method="post" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="files">Select CSV Files</label>
+            <input type="file" id="files" name="files" accept=".csv" multiple required
+                   style="padding: 1rem; border: 2px dashed #444; border-radius: 8px; width: 100%; background: #1a1a1a;">
+            <small style="color: #666; display: block; margin-top: 0.5rem;">
+                Hold Ctrl/Cmd to select multiple files
+            </small>
+        </div>
+        <button type="submit" class="btn btn-primary">Import Trades</button>
+    </form>
+
+    <div style="margin-top: 2rem; padding: 1rem; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333;">
+        <h3 style="margin-bottom: 0.5rem;">Supported Data</h3>
+        <ul style="color: #888; margin-left: 1.25rem;">
+            <li>INDIVIDUAL account transactions only</li>
+            <li>Options trades: opening, closing, expired, assigned</li>
+            <li>Underlying stock trades from assignments</li>
+            <li>Automatic duplicate detection</li>
+            <li>Position tracking across multiple imports</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
