@@ -2,6 +2,35 @@
 
 {% block title %}Positions - Options Trading Analyzer{% endblock %}
 
+{% block extra_head %}
+<style>
+    th.sortable {
+        cursor: pointer;
+        user-select: none;
+        position: relative;
+        padding-right: 1.5rem;
+    }
+    th.sortable:hover {
+        background-color: #333;
+    }
+    th.sortable::after {
+        content: '⇅';
+        position: absolute;
+        right: 0.5rem;
+        opacity: 0.3;
+        font-size: 0.75rem;
+    }
+    th.sortable.asc::after {
+        content: '↑';
+        opacity: 1;
+    }
+    th.sortable.desc::after {
+        content: '↓';
+        opacity: 1;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <h1>Options Positions</h1>
 
@@ -12,19 +41,19 @@
 </div>
 
 {% if positions %}
-<table>
+<table id="positions-table">
     <thead>
         <tr>
-            <th>Symbol</th>
-            <th>Contract</th>
-            <th>Strategy</th>
-            <th>Open Date</th>
-            <th>Close Date</th>
-            <th>Outcome</th>
-            <th>Options P&L</th>
-            <th>Stock P&L</th>
-            <th>Total P&L</th>
-            <th>Result</th>
+            <th class="sortable" data-sort="string">Symbol</th>
+            <th class="sortable" data-sort="string">Contract</th>
+            <th class="sortable" data-sort="string">Strategy</th>
+            <th class="sortable" data-sort="date">Open Date</th>
+            <th class="sortable" data-sort="date">Close Date</th>
+            <th class="sortable" data-sort="string">Outcome</th>
+            <th class="sortable" data-sort="money">Options P&L</th>
+            <th class="sortable" data-sort="money">Stock P&L</th>
+            <th class="sortable" data-sort="money">Total P&L</th>
+            <th class="sortable" data-sort="string">Result</th>
         </tr>
     </thead>
     <tbody>
@@ -66,6 +95,73 @@
         {% endfor %}
     </tbody>
 </table>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const table = document.getElementById('positions-table');
+    const headers = table.querySelectorAll('th.sortable');
+    const tbody = table.querySelector('tbody');
+
+    let currentSort = { column: null, direction: 'asc' };
+
+    headers.forEach((header, index) => {
+        header.addEventListener('click', () => {
+            const sortType = header.dataset.sort;
+
+            // Toggle direction if same column, otherwise reset to asc
+            if (currentSort.column === index) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = index;
+                currentSort.direction = 'asc';
+            }
+
+            // Update header classes
+            headers.forEach(h => h.classList.remove('asc', 'desc'));
+            header.classList.add(currentSort.direction);
+
+            // Sort the rows
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+
+            rows.sort((a, b) => {
+                const aCell = a.cells[index];
+                const bCell = b.cells[index];
+                const aVal = aCell.textContent.trim();
+                const bVal = bCell.textContent.trim();
+
+                let comparison = 0;
+
+                if (sortType === 'money') {
+                    // Parse money values (remove $, commas, handle -)
+                    const aNum = aVal === '-' ? 0 : parseFloat(aVal.replace(/[\$,]/g, ''));
+                    const bNum = bVal === '-' ? 0 : parseFloat(bVal.replace(/[\$,]/g, ''));
+                    comparison = aNum - bNum;
+                } else if (sortType === 'date') {
+                    // Parse MM/DD/YY dates
+                    if (aVal === '-' && bVal === '-') comparison = 0;
+                    else if (aVal === '-') comparison = 1;
+                    else if (bVal === '-') comparison = -1;
+                    else {
+                        const aParts = aVal.split('/');
+                        const bParts = bVal.split('/');
+                        const aDate = new Date(2000 + parseInt(aParts[2]), parseInt(aParts[0]) - 1, parseInt(aParts[1]));
+                        const bDate = new Date(2000 + parseInt(bParts[2]), parseInt(bParts[0]) - 1, parseInt(bParts[1]));
+                        comparison = aDate - bDate;
+                    }
+                } else {
+                    // String comparison
+                    comparison = aVal.localeCompare(bVal);
+                }
+
+                return currentSort.direction === 'asc' ? comparison : -comparison;
+            });
+
+            // Re-append sorted rows
+            rows.forEach(row => tbody.appendChild(row));
+        });
+    });
+});
+</script>
 {% else %}
 <div class="alert alert-info" style="background-color: #252525; border-color: #444; color: #888;">
     No positions found. <a href="/import" style="color: #22c55e;">Import a CSV file</a> to get started.
