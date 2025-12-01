@@ -40,7 +40,7 @@ def create_cumulative_pnl_chart(data: list[tuple[datetime, Decimal]]) -> tuple[s
     line_color = "#22c55e" if values[-1] >= 0 else "#ef4444"
 
     p.line('date', 'pnl', source=source, line_width=2, color=line_color)
-    p.circle('date', 'pnl', source=source, size=6, color=line_color, alpha=0.6)
+    p.scatter('date', 'pnl', source=source, size=6, color=line_color, alpha=0.6)
 
     # Zero line
     p.line(dates, [0] * len(dates), line_dash='dashed', color='gray', alpha=0.5)
@@ -379,7 +379,7 @@ def create_position_pnl_chart(analysis) -> tuple[str, str]:
 
     # Main P&L line
     p.line('price', 'pnl', source=source, line_width=3, color="#3b82f6")
-    p.circle('price', 'pnl', source=source, size=4, color="#3b82f6", alpha=0.6)
+    p.scatter('price', 'pnl', source=source, size=4, color="#3b82f6", alpha=0.6)
 
     # Zero line (breakeven reference)
     zero_line = Span(location=0, dimension='width', line_color='#888',
@@ -422,8 +422,8 @@ def create_position_pnl_chart(analysis) -> tuple[str, str]:
 
         # Add a diamond marker at current P&L point
         if analysis.current_pnl is not None:
-            p.diamond(x=[analysis.current_price], y=[analysis.current_pnl],
-                     size=15, color="#22d3ee", line_color="#fff", line_width=1)
+            p.scatter(x=[analysis.current_price], y=[analysis.current_pnl],
+                      marker='diamond', size=15, color="#22d3ee", line_color="#fff", line_width=1)
 
     hover = HoverTool(tooltips=[
         ("Price", "$@price{0.00}"),
@@ -556,8 +556,8 @@ def create_risk_summary_chart(analyses: list) -> tuple[str, str]:
            color="#ef4444", alpha=0.8, legend_label="Max Loss")
 
     # Premium received marker
-    p.circle(x='premium', y='label', source=source, size=10,
-             color="#3b82f6", legend_label="Premium")
+    p.scatter(x='premium', y='label', source=source, size=10,
+              color="#3b82f6", legend_label="Premium")
 
     # Zero line
     zero_line = Span(location=0, dimension='height', line_color='#888',
