@@ -100,9 +100,11 @@ def parse_csv_content(content: str, account_filter: str = "INDIVIDUAL") -> tuple
     reader = csv.DictReader(StringIO(csv_content))
 
     for row in reader:
-        account = (row.get('Account') or '').strip()
-        if account != account_filter:
-            continue
+        # Only filter by account if the Account column exists in the CSV
+        if 'Account' in row:
+            account = (row.get('Account') or '').strip()
+            if account_filter and account != account_filter:
+                continue
 
         action = row.get('Action') or ''
         symbol = (row.get('Symbol') or '').strip()
@@ -139,9 +141,9 @@ def parse_csv_content(content: str, account_filter: str = "INDIVIDUAL") -> tuple
                 except ValueError:
                     pass
 
-            # Fidelity CSV column mapping (columns are shifted)
-            quantity = int(float(row.get('Price', '0') or '0'))
-            price = Decimal(row.get('Currency', '0') or '0')
+            # Fidelity CSV column mapping
+            quantity = int(float(row.get('Quantity', '0') or '0'))
+            price = Decimal(row.get('Price', '0') or '0')
             commission = Decimal(row.get('Commission', '0') or '0')
             fees = Decimal(row.get('Fees', '0') or '0')
             amount_str = (row.get('Amount', '0') or '0').replace(',', '')
@@ -193,11 +195,11 @@ def _parse_underlying_trade(row: dict, action: str, symbol: str, description: st
     try:
         trade_date = datetime.strptime(row['Run Date'], '%m/%d/%Y')
 
-        # Fidelity CSV column mapping (columns are shifted)
-        quantity_raw = row.get('Price', '0') or '0'
+        # Fidelity CSV column mapping
+        quantity_raw = row.get('Quantity', '0') or '0'
         quantity = int(float(quantity_raw)) if quantity_raw else 0
 
-        price_str = row.get('Currency', '0') or '0'
+        price_str = row.get('Price', '0') or '0'
         price = Decimal(price_str) if price_str else Decimal(0)
 
         amount_str = (row.get('Amount', '0') or '0').replace(',', '')

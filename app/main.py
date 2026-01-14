@@ -3,14 +3,17 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from typing import List
+from typing import List, Optional
 from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.database import init_db, get_db
+from app.models import OptionPosition, OptionContract
 from app.services.csv_import import import_csv
 from app.services.analytics import (
     get_overall_stats,
@@ -28,7 +31,8 @@ from app.charts import (
     create_strategy_chart,
     create_position_pnl_chart,
     create_combined_risk_chart,
-    create_risk_summary_chart
+    create_risk_summary_chart,
+    create_theta_decay_chart
 )
 from app.services.risk_analysis import get_portfolio_risk_summary
 
@@ -231,10 +235,18 @@ async def risk_analysis_page(request: Request, db: AsyncSession = Depends(get_db
     position_charts = []
     for analysis in analyses:
         script, div = create_position_pnl_chart(analysis)
+        
+        # Generate theta decay chart for positions with more than 7 days to expiry
+        theta_script, theta_div = None, None
+        if analysis.days_to_expiry > 7:
+            theta_script, theta_div = create_theta_decay_chart(analysis)
+        
         position_charts.append({
             "analysis": analysis,
             "script": script,
-            "div": div
+            "div": div,
+            "theta_script": theta_script,
+            "theta_div": theta_div
         })
 
     return templates.TemplateResponse("risk.html", {
@@ -273,6 +285,21 @@ async def api_risk(db: AsyncSession = Depends(get_db)):
                 "max_profit": a.max_profit,
                 "max_loss": a.max_loss,
                 "breakeven": a.breakeven,
+                "assignment_probability": a.assignment_probability,
+                "price_at_50pct_assignment": a.price_at_50pct_assignment,
+                "exit_scenarios": [
+                    {
+                        "name": es.name,
+                        "description": es.description,
+                        "pnl": es.pnl,
+                        "pnl_percent": es.pnl_percent,
+                        "underlying_price": es.underlying_price,
+                        "probability": es.probability,
+                        "price_lower_bound": es.price_lower_bound,
+                        "price_upper_bound": es.price_upper_bound
+                    }
+                    for es in a.exit_scenarios
+                ],
                 "scenarios": [
                     {"price": s.underlying_price, "pnl": s.pnl}
                     for s in a.scenarios
@@ -281,3 +308,193 @@ async def api_risk(db: AsyncSession = Depends(get_db)):
             for a in risk_summary["analyses"]
         ]
     }
+
+
+@app.get("/api/risk/calculate-exit")
+async def api_calculate_exit(
+    contract_id: str,
+    close_price: Optional[float] = None,
+    assignment_price: Optional[float] = None,
+    volatility: Optional[float] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Calculate P&L and probability for custom exit scenarios.
+    
+    Args:
+        contract_id: The contract ID string (e.g., "BEPC 03/20/26 $35.00 PUT")
+        close_price: Option price per share to close at (buy to close / sell to close)
+        assignment_price: Underlying price for assignment scenario
+        volatility: Implied volatility as decimal (e.g., 0.30 for 30%). Defaults to 0.30.
+    """
+    from app.services.risk_analysis import (
+        calculate_close_scenario_with_probability,
+        calculate_assignment_scenario_with_probability
+    )
+    from app.services.price_service import get_stock_price
+    from datetime import date, datetime
+    import re
+    
+    # Default volatility if not provided
+    if volatility is None:
+        volatility = 0.30
+    
+    # Clamp volatility to reasonable range (5% to 200%)
+    volatility = max(0.05, min(2.0, volatility))
+    
+    # Parse the contract_id string to extract components
+    # Format: "SYMBOL MM/DD/YY $STRIKE TYPE"
+    match = re.match(r'^(\w+)\s+(\d{2}/\d{2}/\d{2})\s+\$(\d+\.?\d*)\s+(PUT|CALL)$', contract_id)
+    if not match:
+        return {"error": f"Invalid contract_id format: {contract_id}"}
+    
+    symbol = match.group(1)
+    exp_str = match.group(2)
+    strike = float(match.group(3))
+    option_type = match.group(4)
+    
+    # Parse expiration date
+    exp_date = datetime.strptime(exp_str, "%m/%d/%y").date()
+    
+    # Find the position by contract components
+    stmt = select(OptionPosition).options(
+        selectinload(OptionPosition.contract)
+    ).join(OptionContract).where(
+        OptionContract.symbol == symbol,
+        OptionContract.expiration == exp_date,
+        OptionContract.strike == strike,
+        OptionContract.option_type == option_type
+    )
+    
+    result = await db.execute(stmt)
+    position = result.scalar_one_or_none()
+    
+    if not position:
+        return {"error": "Position not found"}
+    
+    contract = position.contract
+    strike = float(contract.strike)
+    option_type = contract.option_type
+    strategy = position.strategy
+    premium = float(position.total_premium)
+    num_contracts = position.num_contracts or 1
+    multiplier = 100 * num_contracts
+    premium_per_share = premium / multiplier if multiplier > 0 else 0
+    
+    today = date.today()
+    days_to_expiry = (contract.expiration - today).days
+    
+    # Fetch current price for probability calculations
+    current_quote = await get_stock_price(symbol)
+    current_price = current_quote.price if current_quote else None
+    
+    response = {
+        "contract_id": contract_id,
+        "symbol": contract.symbol,
+        "strike": strike,
+        "option_type": option_type,
+        "strategy": strategy,
+        "premium": premium,
+        "premium_per_share": round(premium_per_share, 4),
+        "quantity": num_contracts,
+        "days_to_expiry": days_to_expiry,
+        "current_underlying_price": current_price,
+        "volatility_used": round(volatility * 100, 1)
+    }
+    
+    if current_price is None:
+        response["warning"] = "Could not fetch current price - probability calculations unavailable"
+    
+    # Calculate close scenario if requested
+    if close_price is not None and current_price is not None:
+        close_result = calculate_close_scenario_with_probability(
+            option_type=option_type,
+            strategy=strategy,
+            strike=strike,
+            premium=premium,
+            num_contracts=num_contracts,
+            current_price=current_price,
+            days_to_expiry=days_to_expiry,
+            close_price_per_share=close_price,
+            current_option_price=premium_per_share,  # Using original premium as proxy
+            volatility=volatility
+        )
+        
+        response["close_scenario"] = {
+            "close_price_per_share": close_price,
+            "close_cost_total": close_price * multiplier,
+            "pnl": close_result["pnl"],
+            "pnl_percent": close_result["pnl_percent"],
+            "estimated_underlying": close_result["estimated_underlying"],
+            "probability": close_result["probability"],
+            "price_lower_bound": close_result["price_lower_bound"],
+            "price_upper_bound": close_result["price_upper_bound"],
+            "description": close_result["description"]
+        }
+    elif close_price is not None:
+        # Fallback without current price
+        from app.services.risk_analysis import calculate_close_pnl
+        close_pnl = calculate_close_pnl(strategy, premium, close_price, num_contracts)
+        if "SHORT" in strategy:
+            max_risk = strike * multiplier if option_type == "PUT" else premium * 10
+        else:
+            max_risk = abs(premium)
+        
+        response["close_scenario"] = {
+            "close_price_per_share": close_price,
+            "close_cost_total": close_price * multiplier,
+            "pnl": round(close_pnl, 2),
+            "pnl_percent": round((close_pnl / max_risk) * 100, 2) if max_risk else 0,
+            "description": f"{'Buy' if 'SHORT' in strategy else 'Sell'} to close at ${close_price:.2f}/share",
+            "probability": None,
+            "note": "Current price unavailable - probability not calculated"
+        }
+    
+    # Calculate assignment scenario if requested
+    if assignment_price is not None and current_price is not None:
+        assign_result = calculate_assignment_scenario_with_probability(
+            option_type=option_type,
+            strategy=strategy,
+            strike=strike,
+            premium=premium,
+            num_contracts=num_contracts,
+            current_price=current_price,
+            days_to_expiry=days_to_expiry,
+            assignment_price=assignment_price,
+            volatility=volatility
+        )
+        
+        response["assignment_scenario"] = {
+            "underlying_price": assignment_price,
+            "pnl": assign_result["pnl"],
+            "pnl_percent": assign_result["pnl_percent"],
+            "assignment_probability": assign_result["assignment_probability"],
+            "price_probability": assign_result["price_probability"],
+            "expected_range_low": assign_result["expected_range_low"],
+            "expected_range_high": assign_result["expected_range_high"],
+            "description": assign_result["description"]
+        }
+    elif assignment_price is not None:
+        # Fallback without current price
+        from app.services.risk_analysis import calculate_option_pnl_at_expiry, _estimate_delta
+        assignment_pnl = calculate_option_pnl_at_expiry(
+            option_type, strategy, strike, premium, assignment_price, num_contracts
+        )
+        assignment_prob = _estimate_delta(option_type, strike, assignment_price, days_to_expiry)
+        
+        if "SHORT" in strategy:
+            max_risk = strike * multiplier if option_type == "PUT" else premium * 10
+        else:
+            max_risk = abs(premium)
+        
+        response["assignment_scenario"] = {
+            "underlying_price": assignment_price,
+            "pnl": round(assignment_pnl, 2),
+            "pnl_percent": round((assignment_pnl / max_risk) * 100, 2) if max_risk else 0,
+            "assignment_probability": round(assignment_prob * 100, 1),
+            "description": f"Assignment at ${assignment_price:.2f}",
+            "price_probability": None,
+            "note": "Current price unavailable - price probability not calculated"
+        }
+    
+    return response

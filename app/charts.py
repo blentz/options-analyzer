@@ -305,7 +305,7 @@ def _style_chart(p):
 def create_position_pnl_chart(analysis) -> tuple[str, str]:
     """
     Create P&L curve for an open position showing profit/loss at different underlying prices.
-    Shows the payoff diagram at expiration.
+    Shows the payoff diagram at expiration with assignment probability indicators.
     """
     scenarios = analysis.scenarios
     if not scenarios:
@@ -331,13 +331,20 @@ def create_position_pnl_chart(analysis) -> tuple[str, str]:
         'color': colors
     })
 
-    title = f"{analysis.symbol} ${analysis.strike} {analysis.option_type} - {analysis.days_to_expiry}d to expiry"
+    # Build title with assignment probability if available
+    title_parts = [f"{analysis.symbol} ${analysis.strike} {analysis.option_type}"]
+    title_parts.append(f"{analysis.days_to_expiry}d to expiry")
+    if hasattr(analysis, 'assignment_probability') and analysis.assignment_probability is not None:
+        title_parts.append(f"| {analysis.assignment_probability:.0f}% assignment risk")
+    title = " - ".join(title_parts[:2])
+    if len(title_parts) > 2:
+        title += f" {title_parts[2]}"
 
     p = figure(
         title=title,
         x_axis_label="Underlying Price at Expiration",
         y_axis_label="Profit / Loss",
-        height=300,
+        height=350,  # Slightly taller to accommodate new elements
         sizing_mode='stretch_width',
         tools="pan,wheel_zoom,box_zoom,reset,save"
     )
@@ -406,6 +413,43 @@ def create_position_pnl_chart(analysis) -> tuple[str, str]:
                             text=f"B/E ${analysis.breakeven:.2f}",
                             text_color="#a855f7", text_font_size="10pt")
     p.add_layout(breakeven_label)
+
+    # 50% assignment probability line (if available and for short positions)
+    if (hasattr(analysis, 'price_at_50pct_assignment') and 
+        analysis.price_at_50pct_assignment is not None and
+        hasattr(analysis, 'strategy') and 'SHORT' in analysis.strategy):
+        
+        price_50pct = analysis.price_at_50pct_assignment
+        
+        # Only show if within the chart range
+        if min(prices) <= price_50pct <= max(prices):
+            # Add vertical line at 50% assignment probability price
+            fifty_pct_line = Span(location=price_50pct, dimension='height',
+                                  line_color='#f97316', line_dash='dashdot', line_width=2)
+            p.add_layout(fifty_pct_line)
+            
+            # Calculate P&L at 50% assignment price for label positioning
+            mid_pnl = (max(pnls) + min(pnls)) / 2
+            fifty_pct_label = Label(x=price_50pct, y=mid_pnl,
+                                   text=f"50% Assign ${price_50pct:.2f}",
+                                   text_color="#f97316", text_font_size="9pt",
+                                   text_font_style="italic")
+            p.add_layout(fifty_pct_label)
+            
+            # Add a triangular marker at the 50% line on the P&L curve
+            # Interpolate P&L at this price
+            pnl_at_50 = None
+            for i in range(len(prices) - 1):
+                if prices[i] <= price_50pct <= prices[i + 1]:
+                    # Linear interpolation
+                    t = (price_50pct - prices[i]) / (prices[i + 1] - prices[i])
+                    pnl_at_50 = pnls[i] + t * (pnls[i + 1] - pnls[i])
+                    break
+            
+            if pnl_at_50 is not None:
+                p.scatter(x=[price_50pct], y=[pnl_at_50],
+                         marker='triangle', size=12, color="#f97316", 
+                         line_color="#fff", line_width=1)
 
     # Current price marker (if available)
     if analysis.current_price is not None:
@@ -576,5 +620,145 @@ def create_risk_summary_chart(analyses: list) -> tuple[str, str]:
     p.xaxis.formatter = NumeralTickFormatter(format="$0,0")
     p.legend.location = "bottom_right"
 
+    _style_chart(p)
+    return components(p)
+
+
+def create_theta_decay_chart(analysis) -> tuple[str, str]:
+    """
+    Create a chart showing how P&L curves change over time (theta decay).
+    Shows multiple P&L curves at different dates before expiration.
+    """
+    scenarios = analysis.scenarios
+    if not scenarios:
+        return create_empty_chart(f"{analysis.symbol} Time Decay", "No scenario data")
+    
+    # Import Black-Scholes for option value estimation
+    from app.services.risk_analysis import _estimate_delta
+    
+    prices = [s.underlying_price for s in scenarios]
+    days_to_expiry = analysis.days_to_expiry
+    strike = analysis.strike
+    option_type = analysis.option_type
+    strategy = analysis.strategy
+    premium = analysis.premium_received
+    num_contracts = analysis.quantity
+    multiplier = 100 * num_contracts
+    
+    # Determine time points to show (today, 50%, 75%, at expiry)
+    time_points = []
+    if days_to_expiry > 0:
+        time_points.append(("Today", days_to_expiry))
+        if days_to_expiry > 14:
+            time_points.append(("50% Time", days_to_expiry // 2))
+        if days_to_expiry > 7:
+            time_points.append(("75% Time", days_to_expiry // 4))
+    time_points.append(("Expiry", 0))
+    
+    p = figure(
+        title=f"{analysis.symbol} ${strike} {option_type} - Time Decay (Theta)",
+        x_axis_label="Underlying Price",
+        y_axis_label="Profit / Loss",
+        height=350,
+        sizing_mode='stretch_width',
+        tools="pan,wheel_zoom,box_zoom,reset,save"
+    )
+    
+    # Colors for different time curves (darker = closer to expiry)
+    colors = ["#60a5fa", "#3b82f6", "#2563eb", "#1d4ed8"]
+    volatility = 0.30  # Default volatility
+    
+    for i, (label, dte) in enumerate(time_points):
+        pnls = []
+        
+        for price in prices:
+            if dte == 0:
+                # At expiration, use intrinsic value
+                if option_type == "CALL":
+                    intrinsic = max(0, price - strike)
+                else:
+                    intrinsic = max(0, strike - price)
+                
+                if "SHORT" in strategy:
+                    pnl = premium - (intrinsic * multiplier)
+                else:
+                    pnl = (intrinsic * multiplier) - abs(premium)
+            else:
+                # Before expiration, estimate option value using delta approximation
+                # This is a simplified model - real world would use full Black-Scholes
+                delta = _estimate_delta(option_type, strike, price, dte, volatility=volatility)
+                
+                # Estimate time value component (decreases as we approach expiry)
+                time_factor = math.sqrt(dte / max(days_to_expiry, 1))
+                
+                if option_type == "CALL":
+                    intrinsic = max(0, price - strike)
+                else:
+                    intrinsic = max(0, strike - price)
+                
+                # Simplified option value estimation
+                # Option value = intrinsic + time value
+                # Time value is approximated based on delta and time remaining
+                if intrinsic > 0:
+                    # ITM options
+                    time_value = strike * volatility * time_factor * 0.2 * (1 - abs(delta - 0.5) * 2)
+                else:
+                    # OTM options - more time value relative to delta
+                    time_value = strike * volatility * time_factor * 0.3 * delta if option_type == "CALL" else strike * volatility * time_factor * 0.3 * (1 - delta)
+                
+                estimated_option_value = (intrinsic + time_value) * multiplier
+                
+                if "SHORT" in strategy:
+                    pnl = premium - estimated_option_value
+                else:
+                    pnl = estimated_option_value - abs(premium)
+            
+            pnls.append(pnl)
+        
+        color = colors[i % len(colors)]
+        source = ColumnDataSource(data={
+            'price': prices,
+            'pnl': pnls,
+            'pnl_formatted': [f"${v:,.2f}" for v in pnls],
+            'time_label': [label] * len(prices),
+            'dte': [dte] * len(prices)
+        })
+        
+        # Use dashed lines for intermediate time points, solid for expiry
+        line_dash = 'dashed' if dte > 0 else 'solid'
+        line_width = 2 if dte > 0 else 3
+        
+        p.line('price', 'pnl', source=source, line_width=line_width, color=color,
+               legend_label=f"{label} ({dte}d)", line_dash=line_dash, alpha=0.9)
+    
+    # Zero line (breakeven reference)
+    zero_line = Span(location=0, dimension='width', line_color='#888',
+                     line_dash='dashed', line_width=1)
+    p.add_layout(zero_line)
+    
+    # Strike price vertical line
+    strike_line = Span(location=strike, dimension='height',
+                       line_color='#f59e0b', line_dash='dotted', line_width=2)
+    p.add_layout(strike_line)
+    
+    # Current price marker
+    if analysis.current_price is not None:
+        current_line = Span(location=analysis.current_price, dimension='height',
+                           line_color='#22d3ee', line_dash='solid', line_width=2)
+        p.add_layout(current_line)
+    
+    hover = HoverTool(tooltips=[
+        ("Time", "@time_label (@dte days)"),
+        ("Price", "$@price{0.00}"),
+        ("P&L", "@pnl_formatted")
+    ])
+    p.add_tools(hover)
+    
+    p.yaxis.formatter = NumeralTickFormatter(format="$0,0")
+    p.xaxis.formatter = NumeralTickFormatter(format="$0.00")
+    
+    p.legend.location = "top_right"
+    p.legend.click_policy = "hide"
+    
     _style_chart(p)
     return components(p)

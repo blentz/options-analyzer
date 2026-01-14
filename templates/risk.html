@@ -74,12 +74,14 @@
 
 <h2 style="margin-top: 2rem;">Individual Position Payoff Diagrams</h2>
 <p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
-    P&L at expiration based on underlying price. Orange line = strike price, purple line = breakeven.
+    P&L at expiration based on underlying price. Orange line = strike price, purple line = breakeven, 
+    <span style="color: #f97316;">orange dashed</span> = 50% assignment risk level.
+    Positions with >7 days to expiry also show theta decay curves.
 </p>
 
 <div class="charts-grid">
     {% for item in position_charts %}
-    <div class="chart-container">
+    <div class="chart-container" id="position-{{ loop.index }}">
         <div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
             <div>
                 <span class="tag {% if item.analysis.option_type == 'PUT' %}assigned{% else %}expired{% endif %}">
@@ -105,7 +107,22 @@
         </div>
         {{ item.script | safe }}
         {{ item.div | safe }}
-        <div style="margin-top: 0.75rem; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; font-size: 0.85rem;">
+        
+        <!-- Theta Decay Chart (if available) -->
+        {% if item.theta_script and item.theta_div %}
+        <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
+            <div style="margin-bottom: 0.5rem;">
+                <span style="color: #888; font-size: 0.85rem;">
+                    Time Decay (Theta): Shows how P&L changes as expiration approaches
+                </span>
+            </div>
+            {{ item.theta_script | safe }}
+            {{ item.theta_div | safe }}
+        </div>
+        {% endif %}
+        
+        <!-- Position stats row -->
+        <div style="margin-top: 0.75rem; display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.5rem; font-size: 0.85rem;">
             <div>
                 <span style="color: #666;">Premium:</span>
                 <span class="money positive">${{ "{:,.2f}".format(item.analysis.premium_received) }}</span>
@@ -139,7 +156,159 @@
                 <span style="color: #666;">--</span>
                 {% endif %}
             </div>
+            <div>
+                <span style="color: #666;">Assign Risk:</span>
+                {% if item.analysis.assignment_probability is not none %}
+                    {% if item.analysis.assignment_probability > 50 %}
+                    <span style="color: #ef4444; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                    {% elif item.analysis.assignment_probability > 25 %}
+                    <span style="color: #f59e0b; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                    {% else %}
+                    <span style="color: #22c55e;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                    {% endif %}
+                {% else %}
+                <span style="color: #666;">--</span>
+                {% endif %}
+            </div>
         </div>
+        
+        <!-- Exit Scenarios Section -->
+        {% if item.analysis.exit_scenarios %}
+        <div style="margin-top: 1rem; padding: 1rem; background-color: #252525; border-radius: 8px; border: 1px solid #333;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                <h4 style="margin: 0; color: #e0e0e0; font-size: 0.95rem;">Exit Scenario Analysis</h4>
+                <button onclick="toggleScenarios('scenarios-{{ loop.index }}')" 
+                        style="background: #333; border: 1px solid #444; color: #888; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    Toggle Details
+                </button>
+            </div>
+            
+            <div id="scenarios-{{ loop.index }}" style="display: block;">
+                <table style="width: 100%; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid #444;">
+                            <th style="text-align: left; padding: 0.35rem 0.5rem; color: #888;">Scenario</th>
+                            <th style="text-align: right; padding: 0.35rem 0.5rem; color: #888;">P&L</th>
+                            <th style="text-align: right; padding: 0.35rem 0.5rem; color: #888;">% Return</th>
+                            <th style="text-align: left; padding: 0.35rem 0.5rem; color: #888;">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for scenario in item.analysis.exit_scenarios %}
+                        <tr style="border-bottom: 1px solid #333;">
+                            <td style="padding: 0.35rem 0.5rem; color: #e0e0e0;">
+                                {{ scenario.name }}
+                                {% if scenario.probability is not none %}
+                                <span style="color: #f97316; font-size: 0.75rem; margin-left: 0.25rem;">
+                                    ({{ scenario.probability }}% {% if 'Close' in scenario.name %}achievable{% else %}prob{% endif %})
+                                </span>
+                                {% endif %}
+                            </td>
+                            <td style="padding: 0.35rem 0.5rem; text-align: right;" class="{% if scenario.pnl >= 0 %}positive{% else %}negative{% endif %}">
+                                ${{ "{:,.2f}".format(scenario.pnl) }}
+                            </td>
+                            <td style="padding: 0.35rem 0.5rem; text-align: right; color: #888;">
+                                {{ "{:.1f}".format(scenario.pnl_percent) }}%
+                            </td>
+                            <td style="padding: 0.35rem 0.5rem; color: #666; font-size: 0.8rem;">
+                                {% if scenario.underlying_price is not none and scenario.price_lower_bound is not none %}
+                                    <div>{{ scenario.description.split('|')[0] }}</div>
+                                    <div style="color: #3b82f6; margin-top: 0.2rem;">
+                                        Target: ${{ "{:.2f}".format(scenario.underlying_price) }}
+                                        <span style="color: #888;">(1.5&sigma; range: ${{ "{:.2f}".format(scenario.price_lower_bound) }}-${{ "{:.2f}".format(scenario.price_upper_bound) }})</span>
+                                    </div>
+                                {% else %}
+                                    {{ scenario.description }}
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                
+                <!-- Custom Exit Calculator -->
+                <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #333;">
+                    <!-- Volatility Input -->
+                    <div style="margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <label style="color: #888; font-size: 0.8rem;">
+                            Implied Volatility:
+                        </label>
+                        <input type="number" 
+                               step="1" 
+                               min="5" 
+                               max="200"
+                               value="30"
+                               id="volatility-{{ loop.index }}"
+                               style="width: 70px; padding: 0.3rem; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 0.85rem; text-align: center;"
+                               onkeydown="return event.key !== '.'"
+                               oninput="this.value = Math.round(this.value)">
+                        <span style="color: #666; font-size: 0.8rem;">%</span>
+                        <span style="color: #666; font-size: 0.75rem; margin-left: 0.5rem;">(typical: 20-50% for stocks, higher for volatile names)</span>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                        <!-- Close at custom option price -->
+                        <div>
+                            <label style="color: #888; font-size: 0.8rem; display: block; margin-bottom: 0.25rem;">
+                                Close at option price ($/share):
+                            </label>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <input type="number" 
+                                       step="0.01" 
+                                       min="0" 
+                                       placeholder="e.g. 0.50"
+                                       id="close-price-{{ loop.index }}"
+                                       data-contract="{{ item.analysis.contract_id }}"
+                                       style="flex: 1; padding: 0.4rem; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 0.85rem;">
+                                <button onclick="calculateExit('{{ item.analysis.contract_id }}', 'close', {{ loop.index }})"
+                                        style="background: #3b82f6; border: none; color: white; padding: 0.4rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                                    Calculate
+                                </button>
+                            </div>
+                            <div id="close-result-{{ loop.index }}" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+                        </div>
+                        
+                        <!-- Assignment at custom underlying price -->
+                        <div>
+                            <label style="color: #888; font-size: 0.8rem; display: block; margin-bottom: 0.25rem;">
+                                Assignment at underlying price:
+                            </label>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <input type="number" 
+                                       step="0.01" 
+                                       min="0" 
+                                       placeholder="e.g. {{ '{:.2f}'.format(item.analysis.strike) }}"
+                                       id="assign-price-{{ loop.index }}"
+                                       data-contract="{{ item.analysis.contract_id }}"
+                                       style="flex: 1; padding: 0.4rem; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 0.85rem;">
+                                <button onclick="calculateExit('{{ item.analysis.contract_id }}', 'assign', {{ loop.index }})"
+                                        style="background: #f97316; border: none; color: white; padding: 0.4rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                                    Calculate
+                                </button>
+                            </div>
+                            <div id="assign-result-{{ loop.index }}" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- 50% Assignment Price Info -->
+        {% if item.analysis.price_at_50pct_assignment is not none and 'SHORT' in item.analysis.strategy %}
+        <div style="margin-top: 0.5rem; padding: 0.5rem; background-color: #2a2520; border-radius: 4px; border-left: 3px solid #f97316;">
+            <span style="color: #f97316; font-size: 0.85rem;">
+                50% Assignment Risk at: <strong>${{ "{:.2f}".format(item.analysis.price_at_50pct_assignment) }}</strong>
+            </span>
+            {% if item.analysis.current_price is not none %}
+                {% set diff = item.analysis.current_price - item.analysis.price_at_50pct_assignment %}
+                {% set diff_pct = (diff / item.analysis.price_at_50pct_assignment) * 100 %}
+                <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">
+                    ({{ "{:+.1f}".format(diff_pct) }}% from current)
+                </span>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
     {% endfor %}
 </div>
@@ -230,4 +399,150 @@
 </table>
 
 {% endif %}
+
+<script>
+function toggleScenarios(id) {
+    const element = document.getElementById(id);
+    if (element.style.display === 'none') {
+        element.style.display = 'block';
+    } else {
+        element.style.display = 'none';
+    }
+}
+
+function getProbabilityColor(prob) {
+    if (prob > 70) return '#22c55e';  // High probability - green
+    if (prob > 40) return '#f59e0b';  // Medium - orange
+    return '#ef4444';  // Low - red
+}
+
+function getAssignmentProbColor(prob) {
+    if (prob > 50) return '#ef4444';  // High assignment risk - red
+    if (prob > 25) return '#f59e0b';  // Medium - orange
+    return '#22c55e';  // Low - green
+}
+
+async function calculateExit(contractId, type, index) {
+    let url = `/api/risk/calculate-exit?contract_id=${encodeURIComponent(contractId)}`;
+    let resultDiv;
+    
+    // Get volatility from the input (default 30%)
+    const volatilityInput = document.getElementById(`volatility-${index}`);
+    const volatility = volatilityInput ? parseFloat(volatilityInput.value) / 100 : 0.30;
+    url += `&volatility=${volatility}`;
+    
+    if (type === 'close') {
+        const price = document.getElementById(`close-price-${index}`).value;
+        if (!price || price <= 0) {
+            alert('Please enter a valid close price');
+            return;
+        }
+        url += `&close_price=${price}`;
+        resultDiv = document.getElementById(`close-result-${index}`);
+    } else {
+        const price = document.getElementById(`assign-price-${index}`).value;
+        if (!price || price <= 0) {
+            alert('Please enter a valid assignment price');
+            return;
+        }
+        url += `&assignment_price=${price}`;
+        resultDiv = document.getElementById(`assign-result-${index}`);
+    }
+    
+    resultDiv.innerHTML = '<span style="color: #888;">Calculating...</span>';
+    
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        if (data.error) {
+            resultDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.error}</span>`;
+            return;
+        }
+        
+        if (type === 'close' && data.close_scenario) {
+            const scenario = data.close_scenario;
+            const pnlClass = scenario.pnl >= 0 ? 'positive' : 'negative';
+            const probColor = getProbabilityColor(scenario.probability || 0);
+            
+            let html = `
+                <div style="padding: 0.5rem; background: #1e1e1e; border-radius: 4px; border: 1px solid #333;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="color: #888;">P&L:</span>
+                        <span class="${pnlClass}" style="font-weight: 600;">$${scenario.pnl.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 0.25rem;">
+                        <span style="color: #888;">Return:</span>
+                        <span style="color: #888;">${scenario.pnl_percent.toFixed(1)}%</span>
+                    </div>`;
+            
+            if (scenario.probability !== null && scenario.probability !== undefined) {
+                html += `
+                    <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #888;">Likelihood:</span>
+                            <span style="color: ${probColor}; font-weight: 600;">${scenario.probability.toFixed(1)}%</span>
+                        </div>
+                        <div style="color: #3b82f6; font-size: 0.75rem; margin-top: 0.25rem;">
+                            Target underlying: $${scenario.estimated_underlying.toFixed(2)}
+                        </div>
+                        <div style="color: #666; font-size: 0.7rem;">
+                            1.5&sigma; range: $${scenario.price_lower_bound.toFixed(2)} - $${scenario.price_upper_bound.toFixed(2)}
+                        </div>
+                    </div>`;
+            }
+            
+            html += `
+                    <div style="color: #666; font-size: 0.75rem; margin-top: 0.25rem;">${scenario.description}</div>
+                </div>
+            `;
+            resultDiv.innerHTML = html;
+            
+        } else if (type === 'assign' && data.assignment_scenario) {
+            const scenario = data.assignment_scenario;
+            const pnlClass = scenario.pnl >= 0 ? 'positive' : 'negative';
+            const assignProbColor = getAssignmentProbColor(scenario.assignment_probability);
+            const priceProbColor = getProbabilityColor(scenario.price_probability || 0);
+            
+            let html = `
+                <div style="padding: 0.5rem; background: #1e1e1e; border-radius: 4px; border: 1px solid #333;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="color: #888;">P&L:</span>
+                        <span class="${pnlClass}" style="font-weight: 600;">$${scenario.pnl.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 0.25rem;">
+                        <span style="color: #888;">Return:</span>
+                        <span style="color: #888;">${scenario.pnl_percent.toFixed(1)}%</span>
+                    </div>
+                    <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #888;">Assignment Prob (at price):</span>
+                            <span style="color: ${assignProbColor}; font-weight: 600;">${scenario.assignment_probability.toFixed(1)}%</span>
+                        </div>`;
+            
+            if (scenario.price_probability !== null && scenario.price_probability !== undefined) {
+                html += `
+                        <div style="display: flex; justify-content: space-between; margin-top: 0.25rem;">
+                            <span style="color: #888;">Price Likelihood:</span>
+                            <span style="color: ${priceProbColor}; font-weight: 600;">${scenario.price_probability.toFixed(1)}%</span>
+                        </div>
+                        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+                            1&sigma; expected range: $${scenario.expected_range_low.toFixed(2)} - $${scenario.expected_range_high.toFixed(2)}
+                        </div>`;
+            }
+            
+            html += `
+                    </div>
+                    <div style="color: #666; font-size: 0.75rem; margin-top: 0.25rem;">${scenario.description}</div>
+                </div>
+            `;
+            resultDiv.innerHTML = html;
+        } else {
+            resultDiv.innerHTML = '<span style="color: #888;">No result</span>';
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
+    }
+}
+</script>
 {% endblock %}
