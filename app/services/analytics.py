@@ -85,8 +85,10 @@ async def get_overall_stats(db: AsyncSession) -> OverallStats:
     closed = [p for p in positions if p.is_closed]
     open_positions = [p for p in positions if not p.is_closed]
     # Use total_pnl for win/loss determination (includes underlying)
+    # Note: Positions with exactly $0 P&L are considered breakeven, not losses
     winners = [p for p in closed if p.total_pnl > 0]
-    losers = [p for p in closed if p.total_pnl <= 0]
+    losers = [p for p in closed if p.total_pnl < 0]
+    breakeven = [p for p in closed if p.total_pnl == 0]
 
     expired = len([p for p in closed if p.outcome == 'EXPIRED'])
     assigned = len([p for p in closed if p.outcome == 'ASSIGNED'])

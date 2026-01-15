@@ -155,7 +155,7 @@ def create_symbol_pnl_chart(data: list) -> tuple[str, str]:
 
 
 def create_win_loss_chart(winners: int, losers: int) -> tuple[str, str]:
-    """Create win/loss pie chart."""
+    """Create win/loss donut chart."""
     if winners + losers == 0:
         return create_empty_chart("Win/Loss", "No closed positions yet")
 
@@ -170,6 +170,10 @@ def create_win_loss_chart(winners: int, losers: int) -> tuple[str, str]:
         'percentage': [f"{winners / (winners + losers) * 100:.1f}%", f"{losers / (winners + losers) * 100:.1f}%"]
     }
 
+    # Calculate start and end angles for each wedge
+    data['start_angle'] = [0, data['angle'][0]]
+    data['end_angle'] = [data['angle'][0], 2 * pi]
+    
     source = ColumnDataSource(data=data)
 
     p = figure(
@@ -179,19 +183,11 @@ def create_win_loss_chart(winners: int, losers: int) -> tuple[str, str]:
         tools=""
     )
 
-    # Calculate start and end angles
-    data['start_angle'] = [0, data['angle'][0]]
-    data['end_angle'] = [data['angle'][0], 2 * pi]
-    source = ColumnDataSource(data=data)
-
-    p.wedge(x=0, y=0, radius=0.9,
-            start_angle='start_angle', end_angle='end_angle',
-            color='color', source=source, alpha=0.8,
-            legend_field='category')
-
+    # Only render the donut (annular_wedge), not both wedge and annular_wedge
     p.annular_wedge(x=0, y=0, inner_radius=0.5, outer_radius=0.9,
                     start_angle='start_angle', end_angle='end_angle',
-                    color='color', source=source, alpha=0.8)
+                    color='color', source=source, alpha=0.8,
+                    legend_field='category')
 
     hover = HoverTool(tooltips=[
         ("", "@category"),
@@ -684,27 +680,38 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
                 else:
                     pnl = (intrinsic * multiplier) - abs(premium)
             else:
-                # Before expiration, estimate option value using delta approximation
-                # This is a simplified model - real world would use full Black-Scholes
+                # Before expiration, estimate option value using Black-Scholes approximation
+                # This uses a simplified time value decay model based on sqrt(time)
                 delta = _estimate_delta(option_type, strike, price, dte, volatility=volatility)
-                
-                # Estimate time value component (decreases as we approach expiry)
-                time_factor = math.sqrt(dte / max(days_to_expiry, 1))
                 
                 if option_type == "CALL":
                     intrinsic = max(0, price - strike)
                 else:
                     intrinsic = max(0, strike - price)
                 
-                # Simplified option value estimation
-                # Option value = intrinsic + time value
-                # Time value is approximated based on delta and time remaining
-                if intrinsic > 0:
-                    # ITM options
-                    time_value = strike * volatility * time_factor * 0.2 * (1 - abs(delta - 0.5) * 2)
+                # Time value estimation using Black-Scholes-like decay
+                # Time value is approximately: S * σ * √T * pdf(d1) / √(2π)
+                # Simplified as: ATM_time_value * time_factor * delta_adjustment
+                T = dte / 365.0
+                sqrt_T = math.sqrt(T)
+                
+                # ATM time value approximation: 0.4 * σ * S * √T (from BS formula)
+                # This gives roughly correct ATM option values
+                atm_time_value = 0.4 * volatility * strike * sqrt_T
+                
+                # Adjust for moneyness using delta
+                # ATM options (delta ~ 0.5) have max time value
+                # Deep ITM/OTM options have less time value
+                if option_type == "CALL":
+                    moneyness_factor = 2 * delta * (1 - delta) * 2  # Peaks at delta=0.5
                 else:
-                    # OTM options - more time value relative to delta
-                    time_value = strike * volatility * time_factor * 0.3 * delta if option_type == "CALL" else strike * volatility * time_factor * 0.3 * (1 - delta)
+                    # For puts, delta from _estimate_delta is the ITM probability
+                    moneyness_factor = 2 * delta * (1 - delta) * 2
+                
+                # Clamp moneyness factor to reasonable range
+                moneyness_factor = max(0.1, min(1.0, moneyness_factor))
+                
+                time_value = atm_time_value * moneyness_factor
                 
                 estimated_option_value = (intrinsic + time_value) * multiplier
                 

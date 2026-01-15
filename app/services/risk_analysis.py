@@ -13,10 +13,87 @@ from sqlalchemy.orm import selectinload
 from app.models import OptionPosition, OptionContract
 
 
-# Black-Scholes helper functions for assignment probability estimation
+# Constants for Black-Scholes calculations
+# Using 365 calendar days for time to expiry (industry standard for options)
+# Note: Some practitioners use 252 trading days, but calendar days is more common
+# for listed options since theta decays over weekends too.
+CALENDAR_DAYS_PER_YEAR = 365.0
+DEFAULT_RISK_FREE_RATE = 0.05
+DEFAULT_VOLATILITY = 0.30
+
+
+# Black-Scholes helper functions for option probability estimation
 def _norm_cdf(x: float) -> float:
     """Standard normal cumulative distribution function."""
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def _calculate_d1_d2(
+    spot: float,
+    strike: float,
+    time_years: float,
+    risk_free_rate: float,
+    volatility: float
+) -> tuple[float, float]:
+    """
+    Calculate Black-Scholes d1 and d2 parameters.
+    
+    Returns (d1, d2) tuple.
+    """
+    sqrt_t = math.sqrt(time_years)
+    d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * volatility ** 2) * time_years) / (volatility * sqrt_t)
+    d2 = d1 - volatility * sqrt_t
+    return d1, d2
+
+
+def _calculate_price_probability(
+    current_price: float,
+    target_price: float,
+    days_to_expiry: int,
+    volatility: float = DEFAULT_VOLATILITY,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    want_above: bool = True
+) -> float:
+    """
+    Calculate probability of underlying reaching target price before expiry.
+    
+    Uses risk-neutral lognormal distribution from Black-Scholes.
+    P(S_T > K) = N(d2) where d2 = (ln(S/K) + (r - σ²/2)T) / (σ√T)
+    
+    Args:
+        current_price: Current underlying price
+        target_price: Target price to reach
+        days_to_expiry: Days until expiration
+        volatility: Implied volatility (annualized)
+        risk_free_rate: Risk-free interest rate
+        want_above: If True, calculates P(S_T > target), else P(S_T < target)
+    
+    Returns:
+        Probability (0 to 1)
+    """
+    if days_to_expiry <= 0:
+        # At expiry, probability is binary
+        if want_above:
+            return 1.0 if current_price > target_price else 0.0
+        else:
+            return 1.0 if current_price < target_price else 0.0
+    
+    if current_price <= 0 or target_price <= 0:
+        return 0.5
+    
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+    
+    try:
+        # d2 for probability calculation: P(S_T > K) = N(d2)
+        # Note: This is different from delta's d1
+        _, d2 = _calculate_d1_d2(current_price, target_price, T, risk_free_rate, volatility)
+        
+        if want_above:
+            return _norm_cdf(d2)  # P(S_T > target)
+        else:
+            return _norm_cdf(-d2)  # P(S_T < target) = 1 - N(d2) = N(-d2)
+    except (ValueError, ZeroDivisionError):
+        return 0.5
 
 
 def _estimate_delta(
@@ -24,37 +101,46 @@ def _estimate_delta(
     strike: float,
     current_price: float,
     days_to_expiry: int,
-    risk_free_rate: float = 0.05,
-    volatility: float = 0.30
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    volatility: float = DEFAULT_VOLATILITY
 ) -> float:
     """
-    Estimate option delta using Black-Scholes approximation.
-    Delta represents the probability the option will expire ITM.
+    Estimate option delta using Black-Scholes formula.
     
-    For short options:
-    - Short put delta: probability of assignment (put ending ITM)
-    - Short call delta: probability of assignment (call ending ITM)
+    IMPORTANT: Delta is NOT exactly the probability of expiring ITM.
+    - Call delta = N(d1), but P(ITM) = N(d2) under risk-neutral measure
+    - Put delta = N(d1) - 1, but P(ITM) = N(-d2)
+    
+    However, delta is commonly used as a rough proxy for ITM probability
+    because d1 and d2 are close when volatility*sqrt(T) is small.
+    
+    For assignment risk estimation, this approximation is acceptable.
+    
+    Returns:
+        float: Absolute delta value (0 to 1) representing approximate ITM probability
     """
     if days_to_expiry <= 0:
-        # At expiration, delta is binary
+        # At expiration, ITM probability is binary
         if option_type == "CALL":
             return 1.0 if current_price > strike else 0.0
         else:
             return 1.0 if current_price < strike else 0.0
     
-    T = days_to_expiry / 365.0
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
     
     # Avoid log of zero or negative
     if current_price <= 0 or strike <= 0:
         return 0.5
     
     try:
-        d1 = (math.log(current_price / strike) + (risk_free_rate + 0.5 * volatility ** 2) * T) / (volatility * math.sqrt(T))
+        d1, d2 = _calculate_d1_d2(current_price, strike, T, risk_free_rate, volatility)
         
+        # Return approximate ITM probability using N(d2) for more accuracy
+        # N(d2) is the risk-neutral probability of expiring ITM
         if option_type == "CALL":
-            return _norm_cdf(d1)
+            return _norm_cdf(d2)  # P(S_T > K) under risk-neutral measure
         else:  # PUT
-            return _norm_cdf(-d1)  # Probability of put being ITM
+            return _norm_cdf(-d2)  # P(S_T < K) = 1 - N(d2) = N(-d2)
     except (ValueError, ZeroDivisionError):
         return 0.5
 
@@ -64,8 +150,8 @@ def calculate_price_at_delta(
     strike: float,
     days_to_expiry: int,
     target_delta: float = 0.5,
-    risk_free_rate: float = 0.05,
-    volatility: float = 0.30
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    volatility: float = DEFAULT_VOLATILITY
 ) -> Optional[float]:
     """
     Calculate the underlying price where delta equals target value.
@@ -78,7 +164,7 @@ def calculate_price_at_delta(
         # At expiry, the 50% point is exactly at strike
         return strike
     
-    T = days_to_expiry / 365.0
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
     
     try:
         # Solve for S where N(d1) = target_delta for calls
@@ -117,8 +203,8 @@ class ExitScenario:
     pnl_percent: float  # Return on risk
     underlying_price: Optional[float] = None  # Estimated underlying price for this scenario
     probability: Optional[float] = None  # Probability (assignment prob or achievability)
-    price_lower_bound: Optional[float] = None  # Lower bound of price estimate (1.5 sigma)
-    price_upper_bound: Optional[float] = None  # Upper bound of price estimate (1.5 sigma)
+    price_lower_bound: Optional[float] = None  # Lower bound of price estimate (2 sigma)
+    price_upper_bound: Optional[float] = None  # Upper bound of price estimate (2 sigma)
 
 
 @dataclass
@@ -180,13 +266,14 @@ def calculate_option_pnl_at_expiry(
     """
     Calculate P&L at expiration for a given underlying price.
 
-    For SHORT positions (sold options):
-    - Premium is positive (collected)
-    - P&L = Premium - Intrinsic Value at Expiry
-
-    For LONG positions (bought options):
-    - Premium is negative (paid)
-    - P&L = Intrinsic Value at Expiry + Premium (which is negative)
+    Premium convention:
+    - For SHORT positions: premium should be POSITIVE (amount collected)
+    - For LONG positions: premium should be NEGATIVE (amount paid)
+    
+    The function uses abs(premium) internally to handle both conventions safely.
+    
+    Returns:
+        P&L in dollars (positive = profit, negative = loss)
     """
     multiplier = 100 * num_contracts  # Standard options contract
 
@@ -197,15 +284,56 @@ def calculate_option_pnl_at_expiry(
         intrinsic = max(0, strike - underlying_price)
 
     intrinsic_total = intrinsic * multiplier
+    premium_abs = abs(premium)
 
     if "SHORT" in strategy:
         # Short: we collected premium, we owe intrinsic value
-        pnl = premium - intrinsic_total
+        pnl = premium_abs - intrinsic_total
     else:
-        # Long: we paid premium (negative), we receive intrinsic value
-        pnl = intrinsic_total + premium
+        # Long: we paid premium, we receive intrinsic value
+        pnl = intrinsic_total - premium_abs
 
     return pnl
+
+
+def calculate_max_risk(
+    option_type: str,
+    strategy: str,
+    strike: float,
+    premium: float,
+    num_contracts: int,
+    current_price: Optional[float] = None
+) -> tuple[float, bool]:
+    """
+    Calculate the maximum risk (potential loss) for a position.
+    
+    For short calls, risk is theoretically unlimited. We use a practical
+    estimate based on a 3x price move from strike or current price.
+    
+    Returns:
+        tuple: (max_risk_dollars, is_unlimited)
+        - max_risk_dollars: Estimated maximum loss in dollars
+        - is_unlimited: True if risk is theoretically unlimited (short calls)
+    """
+    multiplier = 100 * num_contracts
+    premium_abs = abs(premium)
+    
+    if "SHORT" in strategy:
+        if option_type == "PUT":
+            # Max loss: stock goes to 0, we buy at strike
+            max_risk = (strike * multiplier) - premium_abs
+            return (max(0, max_risk), False)
+        else:  # SHORT CALL
+            # Unlimited risk - estimate based on 3x price move
+            # Use current price if available, otherwise use strike
+            reference_price = current_price if current_price else strike
+            # Assume stock could triple (conservative for risk display)
+            worst_case_price = reference_price * 3
+            max_risk = ((worst_case_price - strike) * multiplier) - premium_abs
+            return (max(0, max_risk), True)  # True = unlimited
+    else:  # LONG positions
+        # Max loss is premium paid
+        return (premium_abs, False)
 
 
 def calculate_breakeven(
@@ -237,6 +365,7 @@ def generate_price_scenarios(
     strike: float,
     premium: float,
     num_contracts: int,
+    current_price: Optional[float] = None,
     num_points: int = 21
 ) -> list[PriceScenario]:
     """Generate P&L scenarios across a range of underlying prices."""
@@ -248,23 +377,23 @@ def generate_price_scenarios(
     step = (max_price - min_price) / (num_points - 1)
 
     # Calculate max risk for percentage calculation
-    if "SHORT" in strategy:
-        if option_type == "PUT":
-            max_risk = strike * 100 * num_contracts  # Max loss if stock goes to 0
-        else:
-            max_risk = abs(premium) if premium < 0 else premium * 10  # Calls have unlimited risk
-    else:
-        max_risk = abs(premium)  # Long options max loss is premium paid
-
-    if max_risk == 0:
-        max_risk = 1  # Avoid division by zero
+    max_risk, is_unlimited = calculate_max_risk(
+        option_type, strategy, strike, premium, num_contracts, current_price
+    )
+    
+    # If max_risk is 0 or very small, return None for percentages
+    use_percentages = max_risk > 0.01
 
     for i in range(num_points):
         price = min_price + (step * i)
         pnl = calculate_option_pnl_at_expiry(
             option_type, strategy, strike, premium, price, num_contracts
         )
-        pnl_percent = (pnl / max_risk) * 100
+        
+        if use_percentages:
+            pnl_percent = (pnl / max_risk) * 100
+        else:
+            pnl_percent = 0.0  # Can't calculate meaningful percentage
 
         scenarios.append(PriceScenario(
             underlying_price=round(price, 2),
@@ -282,62 +411,64 @@ def estimate_underlying_for_option_value(
     current_option_value: float,
     target_option_value: float,
     days_to_expiry: int,
-    volatility: float = 0.30
+    volatility: float = DEFAULT_VOLATILITY
 ) -> tuple[float, float, float]:
     """
     Estimate the underlying price where option would trade at target value.
     Uses delta approximation with volatility-based confidence interval.
     
-    For a short put to be worth 50% of original premium, the stock needs to move
-    favorably (up for puts, down for calls).
+    Note: This is a linear approximation using delta. It becomes less accurate
+    for large price moves due to gamma (delta changes as price moves).
     
-    Returns: (estimated_price, lower_bound_1_5_sigma, upper_bound_1_5_sigma)
+    Args:
+        option_type: "CALL" or "PUT"
+        strike: Option strike price
+        current_price: Current underlying price
+        current_option_value: Current option value per share
+        target_option_value: Target option value per share
+        days_to_expiry: Days until expiration
+        volatility: Implied volatility (annualized)
+    
+    Returns: (estimated_price, lower_bound_2sigma, upper_bound_2sigma)
     """
     if current_option_value <= 0 or days_to_expiry <= 0:
         return (current_price, current_price, current_price)
     
     # Get current delta to estimate sensitivity
+    # Delta is already per-share (dOption_price / dUnderlying_price)
     delta = _estimate_delta(option_type, strike, current_price, days_to_expiry, volatility=volatility)
     
-    # Delta represents dOption/dUnderlying
-    # For puts: delta is negative (option loses value as stock rises)
-    # For calls: delta is positive (option gains value as stock rises)
-    
-    # We want to find price where option_value = target_option_value
-    # dOption = delta * dPrice
-    # target - current = delta * (new_price - current_price)
-    # new_price = current_price + (target - current) / delta
+    # Adjust delta sign for puts (our _estimate_delta returns absolute probability)
+    if option_type == "PUT":
+        # For puts, option value decreases as stock price increases
+        effective_delta = -delta  # Negative delta for puts
+    else:
+        effective_delta = delta  # Positive delta for calls
     
     value_change_needed = target_option_value - current_option_value
     
-    if abs(delta) < 0.01:
+    if abs(effective_delta) < 0.01:
         # Very low delta - option is deep OTM, price change has little effect
         # Return current price with wide confidence interval
-        T = days_to_expiry / 365.0
+        T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
         price_volatility = current_price * volatility * math.sqrt(T)
-        return (current_price, current_price - 1.5 * price_volatility, current_price + 1.5 * price_volatility)
+        return (current_price, current_price - 2.0 * price_volatility, current_price + 2.0 * price_volatility)
     
-    # For puts (negative delta), if we want option to decrease in value (target < current),
-    # value_change_needed is negative, delta is negative, so price change is positive (stock up)
-    price_change_needed = value_change_needed / delta / 100  # per-share delta
+    # Delta approximation: dOption = delta * dUnderlying
+    # new_price = current_price + value_change_needed / delta
+    # Note: No division by 100 - delta is already per-share
+    price_change_needed = value_change_needed / effective_delta
     estimated_price = current_price + price_change_needed
     
     # Calculate confidence interval based on volatility
-    T = days_to_expiry / 365.0
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
     price_volatility = current_price * volatility * math.sqrt(T)
     
-    # 1.5 sigma confidence interval (~87% confidence)
-    sigma_1_5 = 1.5 * price_volatility
+    # 2 sigma confidence interval (~95% confidence)
+    sigma_2 = 2.0 * price_volatility
     
-    # The direction of the interval depends on option type
-    if option_type == "PUT":
-        # For puts, favorable move is UP, so lower bound is less favorable
-        lower_bound = estimated_price - sigma_1_5
-        upper_bound = estimated_price + sigma_1_5
-    else:
-        # For calls, favorable move is UP for long, DOWN for short
-        lower_bound = estimated_price - sigma_1_5
-        upper_bound = estimated_price + sigma_1_5
+    lower_bound = estimated_price - sigma_2
+    upper_bound = estimated_price + sigma_2
     
     return (max(0, estimated_price), max(0, lower_bound), max(0, upper_bound))
 
@@ -351,7 +482,7 @@ def generate_exit_scenarios(
     current_price: Optional[float] = None,
     days_to_expiry: int = 0,
     custom_close_price: Optional[float] = None,
-    volatility: float = 0.30
+    volatility: float = DEFAULT_VOLATILITY
 ) -> list[ExitScenario]:
     """
     Generate P&L for different exit conditions:
@@ -361,42 +492,40 @@ def generate_exit_scenarios(
     """
     scenarios = []
     multiplier = 100 * num_contracts
-    premium_per_share = premium / multiplier if multiplier > 0 else 0
+    premium_abs = abs(premium)
+    premium_per_share = premium_abs / multiplier if multiplier > 0 else 0
     
     # Calculate max risk for percentage calculation
-    if "SHORT" in strategy:
-        if option_type == "PUT":
-            max_risk = strike * multiplier  # Max loss if stock goes to 0
-        else:
-            max_risk = premium * 10 if premium > 0 else abs(premium)  # Calls have unlimited risk
-    else:
-        max_risk = abs(premium)  # Long options max loss is premium paid
+    max_risk, is_unlimited = calculate_max_risk(
+        option_type, strategy, strike, premium, num_contracts, current_price
+    )
     
-    if max_risk == 0:
-        max_risk = 1
+    # Ensure we have a valid denominator for percentages
+    use_percentages = max_risk > 0.01
 
     # Scenario 1: Option expires worthless (OTM at expiration)
     if "SHORT" in strategy:
-        expire_worthless_pnl = premium
+        expire_worthless_pnl = premium_abs
         expire_worthless_desc = "Option expires OTM - keep full premium"
     else:
-        expire_worthless_pnl = premium  # premium is negative for long
+        expire_worthless_pnl = -premium_abs  # Loss of premium paid
         expire_worthless_desc = "Option expires OTM - lose full premium"
     
+    expire_pct = (expire_worthless_pnl / max_risk) * 100 if use_percentages else 0.0
     scenarios.append(ExitScenario(
         name="Expire Worthless",
         description=expire_worthless_desc,
         pnl=round(expire_worthless_pnl, 2),
-        pnl_percent=round((expire_worthless_pnl / max_risk) * 100, 2),
+        pnl_percent=round(expire_pct, 2),
         underlying_price=None,
         probability=0.0 if "SHORT" in strategy else None
     ))
 
     # Scenario 2: Close at 50% premium with underlying price estimate
-    if "SHORT" in strategy and premium > 0 and current_price is not None:
+    if "SHORT" in strategy and premium_abs > 0 and current_price is not None:
         pct = 0.50
-        close_cost = premium * pct  # Cost to buy back (50% of collected)
-        close_pnl = premium - close_cost  # Keep the other 50%
+        close_cost = premium_abs * pct  # Cost to buy back (50% of collected)
+        close_pnl = premium_abs - close_cost  # Keep the other 50%
         
         # Estimate underlying price where option would be worth 50% of original
         target_option_value = premium_per_share * pct  # Target option price per share
@@ -411,34 +540,26 @@ def generate_exit_scenarios(
             volatility=volatility
         )
         
-        # Calculate probability of reaching that price (how likely is it to be achievable)
-        # For a short put, we want stock to go UP to est_price
-        # Probability = 1 - N(d2) where d2 uses est_price as target
-        if days_to_expiry > 0:
-            T = days_to_expiry / 365.0
-            try:
-                d2 = (math.log(current_price / est_price) + (0.05 - 0.5 * volatility ** 2) * T) / (volatility * math.sqrt(T))
-                if option_type == "PUT":
-                    # For puts, favorable is stock going UP past est_price
-                    prob_achievable = _norm_cdf(d2)  # Prob stock > est_price
-                else:
-                    # For calls, favorable is stock going DOWN past est_price (for short calls)
-                    prob_achievable = 1 - _norm_cdf(d2)  # Prob stock < est_price
-            except (ValueError, ZeroDivisionError):
-                prob_achievable = 0.5
-        else:
-            prob_achievable = 0.5
+        # Calculate probability of reaching favorable price using proper d2 formula
+        prob_achievable = _calculate_price_probability(
+            current_price=current_price,
+            target_price=est_price,
+            days_to_expiry=days_to_expiry,
+            volatility=volatility,
+            want_above=(option_type == "PUT")  # Puts want price UP, calls want price DOWN
+        )
         
         # Build description with price estimate
         desc_parts = [f"Buy to close at ${close_cost/multiplier:.2f}/share (50% of premium)"]
         if est_price != current_price:
             desc_parts.append(f"Est. underlying: ${est_price:.2f} (range: ${lower_bound:.2f}-${upper_bound:.2f})")
         
+        close_pct = (close_pnl / max_risk) * 100 if use_percentages else 0.0
         scenarios.append(ExitScenario(
             name="Close at 50% Premium",
             description=" | ".join(desc_parts),
             pnl=round(close_pnl, 2),
-            pnl_percent=round((close_pnl / max_risk) * 100, 2),
+            pnl_percent=round(close_pct, 2),
             underlying_price=round(est_price, 2),
             probability=round(prob_achievable * 100, 1),
             price_lower_bound=round(lower_bound, 2),
@@ -449,17 +570,18 @@ def generate_exit_scenarios(
     if custom_close_price is not None:
         custom_close_cost = custom_close_price * multiplier
         if "SHORT" in strategy:
-            custom_pnl = premium - custom_close_cost
+            custom_pnl = premium_abs - custom_close_cost
             custom_desc = f"Buy to close at ${custom_close_price:.2f}/share"
         else:
-            custom_pnl = custom_close_cost + premium  # premium is negative
+            custom_pnl = custom_close_cost - premium_abs
             custom_desc = f"Sell to close at ${custom_close_price:.2f}/share"
         
+        custom_pct = (custom_pnl / max_risk) * 100 if use_percentages else 0.0
         scenarios.append(ExitScenario(
             name="Custom Close",
             description=custom_desc,
             pnl=round(custom_pnl, 2),
-            pnl_percent=round((custom_pnl / max_risk) * 100, 2),
+            pnl_percent=round(custom_pct, 2),
             underlying_price=None,
             probability=None
         ))
@@ -468,7 +590,7 @@ def generate_exit_scenarios(
     if "SHORT" in strategy and current_price is not None:
         # Assignment at current price
         assignment_pnl_current = calculate_option_pnl_at_expiry(
-            option_type, strategy, strike, premium, current_price, num_contracts
+            option_type, strategy, strike, premium_abs, current_price, num_contracts
         )
         
         assign_prob_current = _estimate_delta(
@@ -478,34 +600,36 @@ def generate_exit_scenarios(
             (option_type == "CALL" and current_price > strike)
         ) else 0.0)
         
+        assign_pct = (assignment_pnl_current / max_risk) * 100 if use_percentages else 0.0
         scenarios.append(ExitScenario(
             name="Assignment at Current",
             description=f"Assigned at current price ${current_price:.2f}",
             pnl=round(assignment_pnl_current, 2),
-            pnl_percent=round((assignment_pnl_current / max_risk) * 100, 2),
+            pnl_percent=round(assign_pct, 2),
             underlying_price=current_price,
             probability=round(assign_prob_current * 100, 1)
         ))
         
         # Assignment at breakeven (skip "Assignment at Strike" since it's always ~50% by definition)
         if option_type == "PUT":
-            breakeven = strike - (premium / multiplier)
+            breakeven = strike - premium_per_share
         else:
-            breakeven = strike + (premium / multiplier)
+            breakeven = strike + premium_per_share
         
         assignment_pnl_breakeven = calculate_option_pnl_at_expiry(
-            option_type, strategy, strike, premium, breakeven, num_contracts
+            option_type, strategy, strike, premium_abs, breakeven, num_contracts
         )
         
         assign_prob_breakeven = _estimate_delta(
             option_type, strike, breakeven, days_to_expiry
         ) if days_to_expiry > 0 else 0.5
         
+        be_pct = (assignment_pnl_breakeven / max_risk) * 100 if use_percentages else 0.0
         scenarios.append(ExitScenario(
             name="Assignment at Breakeven",
             description=f"Assigned at breakeven ${breakeven:.2f} (P&L = $0)",
             pnl=round(assignment_pnl_breakeven, 2),
-            pnl_percent=round((assignment_pnl_breakeven / max_risk) * 100, 2),
+            pnl_percent=round(be_pct, 2),
             underlying_price=round(breakeven, 2),
             probability=round(assign_prob_breakeven * 100, 1)
         ))
@@ -552,7 +676,7 @@ def calculate_close_scenario_with_probability(
     days_to_expiry: int,
     close_price_per_share: float,
     current_option_price: Optional[float] = None,
-    volatility: float = 0.30
+    volatility: float = DEFAULT_VOLATILITY
 ) -> dict:
     """
     Calculate P&L and probability for closing at a specific option price.
@@ -562,11 +686,12 @@ def calculate_close_scenario_with_probability(
     - pnl_percent: Return on risk
     - estimated_underlying: Underlying price where this option price is expected
     - probability: Probability of underlying reaching favorable price before expiry
-    - price_lower_bound: Lower 1.5σ bound
-    - price_upper_bound: Upper 1.5σ bound
+    - price_lower_bound: Lower 2σ bound
+    - price_upper_bound: Upper 2σ bound
     """
     multiplier = 100 * num_contracts
-    premium_per_share = premium / multiplier if multiplier > 0 else 0
+    premium_abs = abs(premium)
+    premium_per_share = premium_abs / multiplier if multiplier > 0 else 0
     
     # Use provided current option price or estimate from premium
     if current_option_price is None:
@@ -576,15 +701,11 @@ def calculate_close_scenario_with_probability(
     pnl = calculate_close_pnl(strategy, premium, close_price_per_share, num_contracts)
     
     # Calculate max risk for percentage
-    if "SHORT" in strategy:
-        if option_type == "PUT":
-            max_risk = strike * multiplier
-        else:
-            max_risk = premium * 10 if premium > 0 else abs(premium)
-    else:
-        max_risk = abs(premium)
+    max_risk, _ = calculate_max_risk(
+        option_type, strategy, strike, premium, num_contracts, current_price
+    )
     
-    pnl_percent = (pnl / max_risk) * 100 if max_risk else 0
+    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 else 0
     
     # Estimate underlying price where option would trade at close_price_per_share
     est_price, lower_bound, upper_bound = estimate_underlying_for_option_value(
@@ -597,31 +718,23 @@ def calculate_close_scenario_with_probability(
         volatility=volatility
     )
     
-    # Calculate probability of reaching favorable price
-    # For short options, favorable means option value decreasing
-    if days_to_expiry > 0:
-        T = days_to_expiry / 365.0
-        try:
-            d2 = (math.log(current_price / est_price) + (0.05 - 0.5 * volatility ** 2) * T) / (volatility * math.sqrt(T))
-            
-            if "SHORT" in strategy:
-                if option_type == "PUT":
-                    # Short put: want stock UP (above est_price) for option to decrease
-                    probability = _norm_cdf(d2) * 100  # P(S > est_price)
-                else:
-                    # Short call: want stock DOWN (below est_price) for option to decrease
-                    probability = (1 - _norm_cdf(d2)) * 100  # P(S < est_price)
-            else:
-                if option_type == "PUT":
-                    # Long put: want stock DOWN for option to increase in value
-                    probability = (1 - _norm_cdf(d2)) * 100
-                else:
-                    # Long call: want stock UP for option to increase in value
-                    probability = _norm_cdf(d2) * 100
-        except (ValueError, ZeroDivisionError):
-            probability = 50.0
+    # Determine if we want price above or below estimated price
+    # For short options to decrease in value:
+    # - Short put: want stock UP (option decreases)
+    # - Short call: want stock DOWN (option decreases)
+    if "SHORT" in strategy:
+        want_above = (option_type == "PUT")
     else:
-        probability = 50.0
+        # Long options want favorable price movement to increase value
+        want_above = (option_type == "CALL")
+    
+    probability = _calculate_price_probability(
+        current_price=current_price,
+        target_price=est_price,
+        days_to_expiry=days_to_expiry,
+        volatility=volatility,
+        want_above=want_above
+    ) * 100
     
     return {
         "pnl": round(pnl, 2),
@@ -643,7 +756,7 @@ def calculate_assignment_scenario_with_probability(
     current_price: float,
     days_to_expiry: int,
     assignment_price: float,
-    volatility: float = 0.30
+    volatility: float = DEFAULT_VOLATILITY
 ) -> dict:
     """
     Calculate P&L and probability for assignment at a specific underlying price.
@@ -662,42 +775,29 @@ def calculate_assignment_scenario_with_probability(
     )
     
     # Calculate max risk for percentage
-    if "SHORT" in strategy:
-        if option_type == "PUT":
-            max_risk = strike * multiplier
-        else:
-            max_risk = premium * 10 if premium > 0 else abs(premium)
-    else:
-        max_risk = abs(premium)
+    max_risk, _ = calculate_max_risk(
+        option_type, strategy, strike, premium, num_contracts, current_price
+    )
     
-    pnl_percent = (pnl / max_risk) * 100 if max_risk else 0
+    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 else 0
     
-    # Assignment probability at this price (delta)
+    # Assignment probability at this price (ITM probability)
     assignment_prob = _estimate_delta(option_type, strike, assignment_price, days_to_expiry, volatility=volatility)
     
-    # Probability of underlying reaching this price before expiry
-    # Use lognormal distribution to calculate P(S_T > X) or P(S_T < X)
-    if days_to_expiry > 0:
-        T = days_to_expiry / 365.0
-        try:
-            # d2 for probability calculation
-            d2 = (math.log(current_price / assignment_price) + (0.05 - 0.5 * volatility ** 2) * T) / (volatility * math.sqrt(T))
-            
-            if assignment_price > current_price:
-                # Target is above current - probability of going up
-                price_probability = _norm_cdf(d2) * 100  # P(S > assignment_price)
-            else:
-                # Target is below current - probability of going down
-                price_probability = (1 - _norm_cdf(d2)) * 100  # P(S < assignment_price)
-        except (ValueError, ZeroDivisionError):
-            price_probability = 50.0
-    else:
-        # At expiry
-        price_probability = 100.0 if assignment_price == current_price else 0.0
+    # Probability of underlying reaching assignment_price
+    # We want probability of reaching that price, regardless of direction
+    want_above = assignment_price > current_price
+    price_probability = _calculate_price_probability(
+        current_price=current_price,
+        target_price=assignment_price,
+        days_to_expiry=days_to_expiry,
+        volatility=volatility,
+        want_above=want_above
+    ) * 100
     
     # Calculate 1σ price range to give context
     if days_to_expiry > 0:
-        T = days_to_expiry / 365.0
+        T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
         sigma_move = current_price * volatility * math.sqrt(T)
         expected_low = current_price - sigma_move
         expected_high = current_price + sigma_move
@@ -719,7 +819,7 @@ def calculate_assignment_scenario_with_probability(
 async def analyze_open_position(
     db: AsyncSession,
     position: OptionPosition,
-    current_quote: Optional[dict] = None
+    current_quote = None
 ) -> OpenPositionAnalysis:
     """Analyze a single open position."""
     contract = position.contract
@@ -737,25 +837,37 @@ async def analyze_open_position(
     days_to_expiry = (contract.expiration - today).days
 
     # Premium per share (for breakeven calculation)
-    premium_per_share = premium / (100 * num_contracts) if num_contracts > 0 else 0
+    premium_abs = abs(premium)
+    premium_per_share = premium_abs / (100 * num_contracts) if num_contracts > 0 else 0
 
     # Calculate breakeven
-    breakeven = calculate_breakeven(option_type, strategy, strike, abs(premium_per_share))
+    breakeven = calculate_breakeven(option_type, strategy, strike, premium_per_share)
 
-    # Calculate max profit/loss
+    # Get current price if available for max risk calculation
+    current_price_for_risk = None
+    if current_quote and hasattr(current_quote, 'price'):
+        current_price_for_risk = current_quote.price
+
+    # Calculate max profit/loss using the new function
+    max_risk, is_unlimited = calculate_max_risk(
+        option_type, strategy, strike, premium, num_contracts, current_price_for_risk
+    )
+    
     if "SHORT" in strategy:
-        max_profit = premium  # Max profit is premium received
-        if option_type == "PUT":
-            max_loss = (strike * 100 * num_contracts) - premium  # Stock goes to 0
-        else:
-            max_loss = float('inf')  # Short calls have unlimited risk
+        max_profit = premium_abs  # Max profit is premium received
+        max_loss = max_risk
+        if is_unlimited:
+            max_loss = float('inf')  # Mark as unlimited for display
     else:
-        max_profit = float('inf') if option_type == "CALL" else (strike * 100 * num_contracts) + premium
-        max_loss = abs(premium)  # Max loss is premium paid
+        if option_type == "CALL":
+            max_profit = float('inf')  # Long calls have unlimited upside
+        else:
+            max_profit = (strike * 100 * num_contracts) - premium_abs  # Long put max profit if stock goes to 0
+        max_loss = premium_abs  # Max loss is premium paid
 
     # Generate scenarios
     scenarios = generate_price_scenarios(
-        option_type, strategy, strike, premium, num_contracts
+        option_type, strategy, strike, premium, num_contracts, current_price_for_risk
     )
 
     # Current price data from quote

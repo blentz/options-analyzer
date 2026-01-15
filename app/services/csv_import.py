@@ -343,7 +343,16 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
             close_date = max(t.trade_date for t in trades)
     else:
         close_date = None
-    num_contracts = max(abs(t.quantity) for t in trades)
+    
+    # Calculate num_contracts: use max absolute quantity from opening trades
+    # This represents the largest position size held at any point.
+    # For ongoing analysis, this gives a conservative risk estimate.
+    opening_trades = [t for t in trades if 'OPENING' in t.action]
+    if opening_trades:
+        num_contracts = max(abs(t.quantity) for t in opening_trades)
+    else:
+        # Fallback to max of all trades if no explicit opening trades found
+        num_contracts = max(abs(t.quantity) for t in trades)
 
     if not position:
         position = OptionPosition(
