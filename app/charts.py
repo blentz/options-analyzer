@@ -641,6 +641,9 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
     num_contracts = analysis.quantity
     multiplier = 100 * num_contracts
     
+    # Use live IV from analysis if available, otherwise default
+    volatility = analysis.implied_volatility if analysis.implied_volatility else 0.30
+    
     # Determine time points to show (today, 50%, 75%, at expiry)
     time_points = []
     if days_to_expiry > 0:
@@ -662,7 +665,6 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
     
     # Colors for different time curves (darker = closer to expiry)
     colors = ["#60a5fa", "#3b82f6", "#2563eb", "#1d4ed8"]
-    volatility = 0.30  # Default volatility
     
     for i, (label, dte) in enumerate(time_points):
         pnls = []

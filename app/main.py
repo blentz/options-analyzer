@@ -325,24 +325,19 @@ async def api_calculate_exit(
         contract_id: The contract ID string (e.g., "BEPC 03/20/26 $35.00 PUT")
         close_price: Option price per share to close at (buy to close / sell to close)
         assignment_price: Underlying price for assignment scenario
-        volatility: Implied volatility as decimal (e.g., 0.30 for 30%). Defaults to 0.30.
+        volatility: Implied volatility as decimal (e.g., 0.30 for 30%). If not provided,
+                   fetches live IV from StockNear (cached for 1 hour).
     """
     from app.services.risk_analysis import (
         calculate_close_scenario_with_probability,
         calculate_assignment_scenario_with_probability
     )
     from app.services.price_service import get_stock_price
+    from app.services.stocknear_service import get_options_overview
     from datetime import date, datetime
     import re
     
-    # Default volatility if not provided
-    if volatility is None:
-        volatility = 0.30
-    
-    # Clamp volatility to reasonable range (5% to 200%)
-    volatility = max(0.05, min(2.0, volatility))
-    
-    # Parse the contract_id string to extract components
+    # Parse the contract_id string to extract components first (need symbol for IV lookup)
     # Format: "SYMBOL MM/DD/YY $STRIKE TYPE"
     match = re.match(r'^(\w+)\s+(\d{2}/\d{2}/\d{2})\s+\$(\d+\.?\d*)\s+(PUT|CALL)$', contract_id)
     if not match:
@@ -352,6 +347,25 @@ async def api_calculate_exit(
     exp_str = match.group(2)
     strike = float(match.group(3))
     option_type = match.group(4)
+    
+    # Fetch live IV from StockNear if not provided
+    iv_source = "user_provided"
+    if volatility is None:
+        try:
+            options_data = await get_options_overview(db, symbol)
+            if options_data and options_data.implied_volatility:
+                volatility = options_data.implied_volatility
+                iv_source = "stocknear_live"
+            else:
+                volatility = 0.30
+                iv_source = "default"
+        except Exception as e:
+            print(f"Warning: Could not fetch IV from StockNear for {symbol}: {e}")
+            volatility = 0.30
+            iv_source = "default"
+    
+    # Clamp volatility to reasonable range (5% to 200%)
+    volatility = max(0.05, min(2.0, volatility))
     
     # Parse expiration date
     exp_date = datetime.strptime(exp_str, "%m/%d/%y").date()
@@ -399,7 +413,8 @@ async def api_calculate_exit(
         "quantity": num_contracts,
         "days_to_expiry": days_to_expiry,
         "current_underlying_price": current_price,
-        "volatility_used": round(volatility * 100, 1)
+        "volatility_used": round(volatility * 100, 1),
+        "volatility_source": iv_source
     }
     
     if current_price is None:
