@@ -120,3 +120,20 @@ class ImportLog(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     records_imported: Mapped[int] = mapped_column(Integer, default=0)
     records_skipped: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class StockNearCache(Base):
+    """Cache for StockNear API data to avoid excessive scraping."""
+    __tablename__ = "stocknear_cache"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cache_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)  # e.g., "options_overview:AAPL"
+    data_type: Mapped[str] = mapped_column(String(50), index=True)  # options_overview, options_chain, stock_quote, etc.
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    data_json: Mapped[str] = mapped_column(String)  # JSON serialized data
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    __table_args__ = (
+        Index('ix_stocknear_cache_lookup', 'cache_key', 'expires_at'),
+    )

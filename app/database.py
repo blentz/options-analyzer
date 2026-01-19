@@ -2,10 +2,11 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from pathlib import Path
 
-DATABASE_PATH = Path("/app/data/options.db")
-DATABASE_URL = f"sqlite+aiosqlite:///{DATABASE_PATH}"
+from app.config import settings
+
+DATABASE_PATH = settings.database_path_obj
+DATABASE_URL = settings.database_url
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

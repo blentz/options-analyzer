@@ -203,8 +203,8 @@ class ExitScenario:
     pnl_percent: float  # Return on risk
     underlying_price: Optional[float] = None  # Estimated underlying price for this scenario
     probability: Optional[float] = None  # Probability (assignment prob or achievability)
-    price_lower_bound: Optional[float] = None  # Lower bound of price estimate (2 sigma)
-    price_upper_bound: Optional[float] = None  # Upper bound of price estimate (2 sigma)
+    price_lower_bound: Optional[float] = None  # Lower bound of price estimate (3 sigma)
+    price_upper_bound: Optional[float] = None  # Upper bound of price estimate (3 sigma)
 
 
 @dataclass
@@ -253,6 +253,12 @@ class OpenPositionAnalysis:
     # Assignment risk metrics
     assignment_probability: Optional[float] = None  # Current probability of assignment
     price_at_50pct_assignment: Optional[float] = None  # Price where assignment prob = 50%
+    
+    # Live options data from StockNear
+    implied_volatility: Optional[float] = None  # Live IV as decimal (e.g., 0.35 = 35%)
+    iv_rank: Optional[float] = None  # IV Rank (0-100)
+    iv_percentile: Optional[float] = None  # IV Percentile (0-100)
+    max_pain: Optional[float] = None  # Max pain price for this expiration
 
 
 def calculate_option_pnl_at_expiry(
@@ -429,7 +435,7 @@ def estimate_underlying_for_option_value(
         days_to_expiry: Days until expiration
         volatility: Implied volatility (annualized)
     
-    Returns: (estimated_price, lower_bound_2sigma, upper_bound_2sigma)
+    Returns: (estimated_price, lower_bound_3sigma, upper_bound_3sigma)
     """
     if current_option_value <= 0 or days_to_expiry <= 0:
         return (current_price, current_price, current_price)
@@ -449,10 +455,12 @@ def estimate_underlying_for_option_value(
     
     if abs(effective_delta) < 0.01:
         # Very low delta - option is deep OTM, price change has little effect
-        # Return current price with wide confidence interval
+        # Return current price with wide confidence interval using lognormal bounds
         T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
-        price_volatility = current_price * volatility * math.sqrt(T)
-        return (current_price, current_price - 2.0 * price_volatility, current_price + 2.0 * price_volatility)
+        drift = (DEFAULT_RISK_FREE_RATE - 0.5 * volatility ** 2) * T
+        lower_bound = current_price * math.exp(drift - 3.0 * volatility * math.sqrt(T))
+        upper_bound = current_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
+        return (current_price, lower_bound, upper_bound)
     
     # Delta approximation: dOption = delta * dUnderlying
     # new_price = current_price + value_change_needed / delta
@@ -460,15 +468,15 @@ def estimate_underlying_for_option_value(
     price_change_needed = value_change_needed / effective_delta
     estimated_price = current_price + price_change_needed
     
-    # Calculate confidence interval based on volatility
+    # Calculate confidence interval using lognormal distribution
+    # Stock prices follow: S_T = S_0 * exp((r - σ²/2)T + σ√T * Z)
+    # 3σ bounds give ~99.7% confidence interval
     T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
-    price_volatility = current_price * volatility * math.sqrt(T)
+    drift = (DEFAULT_RISK_FREE_RATE - 0.5 * volatility ** 2) * T
     
-    # 2 sigma confidence interval (~95% confidence)
-    sigma_2 = 2.0 * price_volatility
-    
-    lower_bound = estimated_price - sigma_2
-    upper_bound = estimated_price + sigma_2
+    # Apply lognormal bounds centered on the estimated price
+    lower_bound = estimated_price * math.exp(drift - 3.0 * volatility * math.sqrt(T))
+    upper_bound = estimated_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
     
     return (max(0, estimated_price), max(0, lower_bound), max(0, upper_bound))
 
@@ -686,8 +694,8 @@ def calculate_close_scenario_with_probability(
     - pnl_percent: Return on risk
     - estimated_underlying: Underlying price where this option price is expected
     - probability: Probability of underlying reaching favorable price before expiry
-    - price_lower_bound: Lower 2σ bound
-    - price_upper_bound: Upper 2σ bound
+    - price_lower_bound: Lower 3σ bound (lognormal)
+    - price_upper_bound: Upper 3σ bound (lognormal)
     """
     multiplier = 100 * num_contracts
     premium_abs = abs(premium)
@@ -795,12 +803,13 @@ def calculate_assignment_scenario_with_probability(
         want_above=want_above
     ) * 100
     
-    # Calculate 1σ price range to give context
+    # Calculate 3σ price range using lognormal distribution (~99.7% confidence)
+    # Stock prices follow: S_T = S_0 * exp((r - σ²/2)T + σ√T * Z)
     if days_to_expiry > 0:
         T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
-        sigma_move = current_price * volatility * math.sqrt(T)
-        expected_low = current_price - sigma_move
-        expected_high = current_price + sigma_move
+        drift = (DEFAULT_RISK_FREE_RATE - 0.5 * volatility ** 2) * T
+        expected_low = current_price * math.exp(drift - 3.0 * volatility * math.sqrt(T))
+        expected_high = current_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
     else:
         expected_low = current_price
         expected_high = current_price
@@ -819,10 +828,23 @@ def calculate_assignment_scenario_with_probability(
 async def analyze_open_position(
     db: AsyncSession,
     position: OptionPosition,
-    current_quote = None
+    current_quote = None,
+    live_volatility: Optional[float] = None
 ) -> OpenPositionAnalysis:
-    """Analyze a single open position."""
+    """
+    Analyze a single open position.
+    
+    Args:
+        db: Database session
+        position: The option position to analyze
+        current_quote: Current stock quote with price data
+        live_volatility: Live implied volatility from StockNear (as decimal, e.g. 0.35)
+                        If None, falls back to DEFAULT_VOLATILITY (0.30)
+    """
     contract = position.contract
+    
+    # Use live volatility if provided, otherwise default
+    volatility = live_volatility if live_volatility else DEFAULT_VOLATILITY
 
     strike = float(contract.strike)
     option_type = contract.option_type
@@ -901,22 +923,22 @@ async def analyze_open_position(
 
         distance_to_strike_pct = (distance_to_strike / strike) * 100 if strike > 0 else 0
         
-        # Calculate assignment probability using delta approximation
+        # Calculate assignment probability using delta approximation with live IV
         if "SHORT" in strategy:
             assignment_probability = _estimate_delta(
-                option_type, strike, current_price, days_to_expiry
+                option_type, strike, current_price, days_to_expiry, volatility=volatility
             )
             assignment_probability = round(assignment_probability * 100, 1)  # Convert to percentage
 
     # Calculate price at 50% assignment probability
     if "SHORT" in strategy:
         price_at_50pct = calculate_price_at_delta(
-            option_type, strike, days_to_expiry, target_delta=0.5
+            option_type, strike, days_to_expiry, target_delta=0.5, volatility=volatility
         )
         if price_at_50pct:
             price_at_50pct = round(price_at_50pct, 2)
     
-    # Generate exit scenarios
+    # Generate exit scenarios with live volatility
     exit_scenarios = generate_exit_scenarios(
         option_type=option_type,
         strategy=strategy,
@@ -924,7 +946,8 @@ async def analyze_open_position(
         premium=premium,
         num_contracts=num_contracts,
         current_price=current_price,
-        days_to_expiry=days_to_expiry
+        days_to_expiry=days_to_expiry,
+        volatility=volatility
     )
 
     return OpenPositionAnalysis(
@@ -950,7 +973,8 @@ async def analyze_open_position(
         scenarios=scenarios,
         exit_scenarios=exit_scenarios,
         assignment_probability=assignment_probability,
-        price_at_50pct_assignment=price_at_50pct
+        price_at_50pct_assignment=price_at_50pct,
+        implied_volatility=volatility if live_volatility else None
     )
 
 
@@ -958,6 +982,7 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
     """Get risk analysis for all open positions that haven't expired."""
     from datetime import date as date_type
     from app.services.price_service import get_multiple_prices
+    from app.services.stocknear_service import get_options_overview
 
     today = date_type.today()
 
@@ -983,12 +1008,41 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
     # Fetch current prices for all unique symbols
     symbols = list(set(p.contract.symbol for p in valid_positions))
     quotes = await get_multiple_prices(symbols)
+    
+    # Fetch options data (IV, etc.) for all unique symbols from StockNear
+    # This uses the cache so won't hit the API if data is fresh
+    options_data_by_symbol = {}
+    for symbol in symbols:
+        try:
+            options_data = await get_options_overview(db, symbol)
+            if options_data:
+                options_data_by_symbol[symbol] = options_data
+        except Exception as e:
+            print(f"Warning: Could not fetch StockNear data for {symbol}: {e}")
 
-    # Analyze each position with current price data
+    # Analyze each position with current price data and live IV
     analyses = []
     for position in valid_positions:
         quote = quotes.get(position.contract.symbol)
-        analysis = await analyze_open_position(db, position, quote)
+        options_data = options_data_by_symbol.get(position.contract.symbol)
+        
+        # Get live IV or fall back to default
+        live_iv = None
+        iv_rank = None
+        iv_percentile = None
+        if options_data:
+            live_iv = options_data.implied_volatility
+            iv_rank = options_data.iv_rank
+            iv_percentile = options_data.iv_percentile
+        
+        analysis = await analyze_open_position(db, position, quote, live_iv)
+        
+        # Add StockNear-specific fields
+        if options_data:
+            analysis.implied_volatility = live_iv
+            analysis.iv_rank = iv_rank
+            analysis.iv_percentile = iv_percentile
+        
         analyses.append(analysis)
 
     return analyses

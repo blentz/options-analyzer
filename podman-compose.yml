@@ -9,7 +9,32 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Application data (database, etc.)
       - ./data:/app/data
+      
+      # Mount LibreWolf/Firefox profile for StockNear authentication cookies
+      # The container path must match STOCKNEAR_BROWSER_PROFILE_PATH env var
+      # Adjust the host path to match your LibreWolf profile location
+      - ${LIBREWOLF_PROFILE_PATH}:/app/browser-profile:ro
+    
     environment:
       - PYTHONUNBUFFERED=1
+      
+      # Database configuration
+      - DATABASE_PATH=/app/data/options.db
+      
+      # StockNear configuration
+      # Path inside container where browser profile is mounted
+      - STOCKNEAR_BROWSER_PROFILE_PATH=/app/browser-profile
+      
+      # Run browser headless (no GUI)
+      - STOCKNEAR_HEADLESS=true
+      
+      # Rate limiting: seconds between StockNear requests
+      - STOCKNEAR_RATE_LIMIT_DELAY=1.0
+      
+      # Cache TTL: how long to cache StockNear data (seconds)
+      # Default: 3600 (1 hour)
+      - STOCKNEAR_CACHE_TTL_SECONDS=3600
+      
     restart: unless-stopped
