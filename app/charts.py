@@ -768,6 +768,256 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
     
     p.legend.location = "top_right"
     p.legend.click_policy = "hide"
+
+    _style_chart(p)
+    return components(p)
+
+
+def create_speculation_pnl_chart(analysis) -> tuple[str, str]:
+    """
+    Create P&L curve for a speculation strategy showing profit/loss at different underlying prices.
+    Similar to create_position_pnl_chart but for hypothetical strategies.
+    """
+    from app.services.speculation_analysis import StrategyAnalysis
     
+    scenarios = analysis.scenarios
+    if not scenarios:
+        return create_empty_chart(f"{analysis.symbol} P&L", "No scenario data")
+
+    prices = [s.underlying_price for s in scenarios]
+    pnls = [s.pnl for s in scenarios]
+
+    # Determine colors for the P&L line segments
+    colors = []
+    for pnl in pnls:
+        if pnl > 0:
+            colors.append("#22c55e")
+        elif pnl < 0:
+            colors.append("#ef4444")
+        else:
+            colors.append("#888888")
+
+    source = ColumnDataSource(data={
+        'price': prices,
+        'pnl': pnls,
+        'pnl_formatted': [f"${v:,.2f}" for v in pnls],
+        'color': colors
+    })
+
+    # Build title
+    title = f"{analysis.symbol} - {analysis.strategy_name}"
+    if analysis.days_to_expiry > 0:
+        title += f" ({analysis.days_to_expiry}d to expiry)"
+
+    p = figure(
+        title=title,
+        x_axis_label="Underlying Price at Expiration",
+        y_axis_label="Profit / Loss",
+        height=400,
+        sizing_mode='stretch_width',
+        tools="pan,wheel_zoom,box_zoom,reset,save"
+    )
+
+    # Create gradient fill for profit/loss regions
+    profit_prices = []
+    profit_pnls = []
+    loss_prices = []
+    loss_pnls = []
+
+    for price, pnl in zip(prices, pnls):
+        if pnl >= 0:
+            profit_prices.append(price)
+            profit_pnls.append(pnl)
+        if pnl <= 0:
+            loss_prices.append(price)
+            loss_pnls.append(pnl)
+
+    # Fill profit region
+    if profit_prices:
+        profit_source = ColumnDataSource(data={
+            'price': profit_prices,
+            'pnl': profit_pnls,
+            'zero': [0] * len(profit_prices)
+        })
+        p.varea(x='price', y1='zero', y2='pnl', source=profit_source,
+                fill_color="#22c55e", fill_alpha=0.2)
+
+    # Fill loss region
+    if loss_prices:
+        loss_source = ColumnDataSource(data={
+            'price': loss_prices,
+            'pnl': loss_pnls,
+            'zero': [0] * len(loss_prices)
+        })
+        p.varea(x='price', y1='pnl', y2='zero', source=loss_source,
+                fill_color="#ef4444", fill_alpha=0.2)
+
+    # Main P&L line
+    p.line('price', 'pnl', source=source, line_width=3, color="#3b82f6")
+    p.scatter('price', 'pnl', source=source, size=4, color="#3b82f6", alpha=0.6)
+
+    # Zero line (breakeven reference)
+    zero_line = Span(location=0, dimension='width', line_color='#888',
+                     line_dash='dashed', line_width=1)
+    p.add_layout(zero_line)
+
+    # Current price vertical line
+    if analysis.current_price is not None:
+        current_line = Span(location=analysis.current_price, dimension='height',
+                           line_color='#22d3ee', line_dash='solid', line_width=3)
+        p.add_layout(current_line)
+
+        current_label = Label(x=analysis.current_price, y=max(pnls) * 0.7,
+                             text=f"Current ${analysis.current_price:.2f}",
+                             text_color="#22d3ee", text_font_size="10pt",
+                             text_font_style="bold")
+        p.add_layout(current_label)
+
+    # Breakeven lines
+    for i, be in enumerate(analysis.breakeven_prices[:4]):  # Limit to 4 breakevens
+        be_line = Span(location=be, dimension='height',
+                       line_color='#a855f7', line_dash='dashed', line_width=2)
+        p.add_layout(be_line)
+
+        # Stagger label positions
+        label_y = min(pnls) * 0.9 if i % 2 == 0 else max(pnls) * 0.9
+        be_label = Label(x=be, y=label_y,
+                        text=f"B/E ${be:.2f}",
+                        text_color="#a855f7", text_font_size="9pt")
+        p.add_layout(be_label)
+
+    # Strike lines for each leg
+    strikes = list(set(leg.strike for leg in analysis.legs))
+    for strike in strikes[:4]:  # Limit to 4 strikes
+        strike_line = Span(location=strike, dimension='height',
+                          line_color='#f59e0b', line_dash='dotted', line_width=1)
+        p.add_layout(strike_line)
+
+    hover = HoverTool(tooltips=[
+        ("Price", "$@price{0.00}"),
+        ("P&L", "@pnl_formatted")
+    ])
+    p.add_tools(hover)
+
+    p.yaxis.formatter = NumeralTickFormatter(format="$0,0")
+    p.xaxis.formatter = NumeralTickFormatter(format="$0.00")
+
+    _style_chart(p)
+    return components(p)
+
+
+def create_speculation_theta_chart(analysis) -> tuple[str, str]:
+    """
+    Create a chart showing how P&L curves change over time (theta decay) for speculation.
+    """
+    from app.services.speculation_analysis import calculate_strategy_pnl_at_price
+    
+    scenarios = analysis.scenarios
+    if not scenarios:
+        return create_empty_chart(f"{analysis.symbol} Time Decay", "No scenario data")
+
+    prices = [s.underlying_price for s in scenarios]
+    days_to_expiry = analysis.days_to_expiry
+    legs = analysis.legs
+    
+    # Use IV from analysis or default
+    volatility = analysis.implied_volatility if analysis.implied_volatility else 0.30
+
+    # Determine time points to show (today, 50%, 75%, at expiry)
+    time_points = []
+    if days_to_expiry > 0:
+        time_points.append(("Today", days_to_expiry))
+        if days_to_expiry > 14:
+            time_points.append(("50% Time", days_to_expiry // 2))
+        if days_to_expiry > 7:
+            time_points.append(("75% Time", days_to_expiry // 4))
+    time_points.append(("Expiry", 0))
+
+    p = figure(
+        title=f"{analysis.symbol} - {analysis.strategy_name} Time Decay (Theta)",
+        x_axis_label="Underlying Price",
+        y_axis_label="Profit / Loss",
+        height=350,
+        sizing_mode='stretch_width',
+        tools="pan,wheel_zoom,box_zoom,reset,save"
+    )
+
+    # Colors for different time curves (lighter = further from expiry)
+    colors = ["#60a5fa", "#3b82f6", "#2563eb", "#1d4ed8"]
+
+    for i, (label, dte) in enumerate(time_points):
+        pnls = []
+
+        for price in prices:
+            if dte == 0:
+                # At expiration, use intrinsic value calculation
+                pnl = calculate_strategy_pnl_at_price(legs, price)
+            else:
+                # Before expiration, estimate using time value decay
+                # This is a simplified model - multiply by sqrt(time_remaining/total_time)
+                intrinsic_pnl = calculate_strategy_pnl_at_price(legs, price)
+                
+                # Estimate time value decay factor
+                # At expiry, options are worth intrinsic only
+                # Before expiry, they have additional time value
+                time_factor = math.sqrt(dte / max(days_to_expiry, 1))
+                
+                # Net premium represents the maximum time value component
+                net_premium = analysis.net_premium
+                
+                # Time value decay affects short positions positively, long positions negatively
+                # For credit strategies (net_premium > 0): time decay helps
+                # For debit strategies (net_premium < 0): time decay hurts
+                time_value_remaining = abs(net_premium) * time_factor
+                
+                if net_premium > 0:
+                    # Credit: we've collected premium, owe intrinsic. Time value helps us.
+                    pnl = intrinsic_pnl + (abs(net_premium) - time_value_remaining)
+                else:
+                    # Debit: we've paid premium, receive intrinsic. Time value hurts us.
+                    pnl = intrinsic_pnl - (abs(net_premium) - time_value_remaining)
+
+            pnls.append(pnl)
+
+        color = colors[i % len(colors)]
+        source = ColumnDataSource(data={
+            'price': prices,
+            'pnl': pnls,
+            'pnl_formatted': [f"${v:,.2f}" for v in pnls],
+            'time_label': [label] * len(prices),
+            'dte': [dte] * len(prices)
+        })
+
+        # Use dashed lines for intermediate time points, solid for expiry
+        line_dash = 'dashed' if dte > 0 else 'solid'
+        line_width = 2 if dte > 0 else 3
+
+        p.line('price', 'pnl', source=source, line_width=line_width, color=color,
+               legend_label=f"{label} ({dte}d)", line_dash=line_dash, alpha=0.9)
+
+    # Zero line
+    zero_line = Span(location=0, dimension='width', line_color='#888',
+                     line_dash='dashed', line_width=1)
+    p.add_layout(zero_line)
+
+    # Current price marker
+    if analysis.current_price is not None:
+        current_line = Span(location=analysis.current_price, dimension='height',
+                           line_color='#22d3ee', line_dash='solid', line_width=2)
+        p.add_layout(current_line)
+
+    hover = HoverTool(tooltips=[
+        ("Time", "@time_label (@dte days)"),
+        ("Price", "$@price{0.00}"),
+        ("P&L", "@pnl_formatted")
+    ])
+    p.add_tools(hover)
+
+    p.yaxis.formatter = NumeralTickFormatter(format="$0,0")
+    p.xaxis.formatter = NumeralTickFormatter(format="$0.00")
+
+    p.legend.location = "top_right"
+    p.legend.click_policy = "hide"
+
     _style_chart(p)
     return components(p)

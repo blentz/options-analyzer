@@ -1,0 +1,1205 @@
+{% extends "base.html" %}
+
+{% block title %}Options Speculation - Options Trading Analyzer{% endblock %}
+
+{% block extra_head %}
+<style>
+/* Speculation page styles - extracted from inline */
+.spec-input {
+    width: 100%;
+    padding: 0.4rem;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+}
+
+.spec-input:focus {
+    border-color: #3b82f6;
+    outline: none;
+}
+
+.spec-label {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: #666;
+    font-size: 0.75rem;
+}
+
+.leg-row {
+    display: grid;
+    grid-template-columns: 90px 90px 110px 70px 160px 40px;
+    gap: 0.5rem;
+    align-items: end;
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    background: #252525;
+    border-radius: 6px;
+}
+
+.leg-row-field {
+    display: flex;
+    flex-direction: column;
+}
+
+.premium-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+}
+
+.quote-btn {
+    background: #333;
+    border: 1px solid #444;
+    color: #3b82f6;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.65rem;
+}
+
+.quote-btn:hover {
+    background: #444;
+}
+
+.quote-display {
+    margin-top: 0.2rem;
+    min-height: 1.2rem;
+    font-size: 0.7rem;
+}
+
+.quote-bid { color: #22c55e; }
+.quote-mid { color: #3b82f6; font-weight: 600; }
+.quote-ask { color: #ef4444; }
+.quote-last { color: #888; }
+
+.remove-btn {
+    padding: 0.4rem 0.6rem;
+    background: #333;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #ef4444;
+    cursor: pointer;
+}
+
+.remove-btn:hover {
+    background: #442222;
+}
+
+.exit-calc-card {
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    background-color: #252525;
+    border-radius: 6px;
+    border: 1px solid #333;
+}
+
+.exit-calc-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.calc-btn-blue {
+    background: #3b82f6;
+    border: none;
+    color: white;
+    padding: 0.4rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.calc-btn-orange {
+    background: #f97316;
+    border: none;
+    color: white;
+    padding: 0.4rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.result-card {
+    padding: 0.5rem;
+    background: #1e1e1e;
+    border-radius: 4px;
+    border: 1px solid #333;
+}
+
+.loading-indicator {
+    color: #888;
+    font-size: 0.75rem;
+}
+
+.error-text {
+    color: #ef4444;
+}
+
+.success-text {
+    color: #22c55e;
+}
+
+/* Border colors for premium input states */
+.premium-chain { border-color: #22c55e !important; }
+.premium-quote { border-color: #3b82f6 !important; }
+.premium-last { border-color: #f59e0b !important; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Options Speculation</h1>
+<p style="color: #888; margin-bottom: 1.5rem;">
+    Analyze hypothetical options strategies before entering positions. Data from StockNear (cached 5 min).
+</p>
+
+<!-- Symbol Lookup Section -->
+<div class="stat-card" style="margin-bottom: 1.5rem;">
+    <h2 style="margin-bottom: 1rem;">Symbol Lookup</h2>
+    <div style="display: flex; gap: 1rem; align-items: flex-end;">
+        <div style="flex: 0 0 150px;">
+            <label class="spec-label">Symbol</label>
+            <input type="text" 
+                   id="symbol-input" 
+                   placeholder="e.g. AAPL"
+                   class="spec-input"
+                   style="text-transform: uppercase;"
+                   onkeydown="if(event.key === 'Enter') SpecApp.lookupSymbol()">
+        </div>
+        <button onclick="SpecApp.lookupSymbol()" class="btn btn-primary">Lookup</button>
+    </div>
+    <div id="lookup-result" style="margin-top: 1rem; display: none;"></div>
+</div>
+
+<!-- Symbol Data Display (shown after lookup) -->
+<div id="symbol-data" style="display: none;">
+    <div class="stats-grid" style="margin-bottom: 1.5rem;">
+        <div class="stat-card">
+            <div class="label">Current Price</div>
+            <div class="value" id="current-price">--</div>
+            <div id="price-change" style="font-size: 0.85rem; margin-top: 0.25rem;"></div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Implied Volatility</div>
+            <div class="value" id="iv-value">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">IV Rank</div>
+            <div class="value" id="iv-rank">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Max Pain</div>
+            <div class="value" id="max-pain">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Put/Call Ratio</div>
+            <div class="value" id="put-call-ratio">--</div>
+        </div>
+    </div>
+
+    <!-- Strategy Builder -->
+    <div class="stat-card" style="margin-bottom: 1.5rem;">
+        <h2 style="margin-bottom: 1rem;">Strategy Builder</h2>
+        
+        <!-- Strategy-level settings: Template and Expiration -->
+        <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+            <div>
+                <label class="spec-label">Quick Strategy</label>
+                <select id="strategy-template" 
+                        onchange="SpecApp.applyStrategyTemplate()"
+                        class="spec-input"
+                        style="min-width: 200px;">
+                    <option value="">-- Select template --</option>
+                    <option value="long_call">Long Call</option>
+                    <option value="long_put">Long Put</option>
+                    <option value="short_put">Short Put (Cash Secured)</option>
+                    <option value="short_call">Short Call (Naked)</option>
+                    <option value="bull_call_spread">Bull Call Spread</option>
+                    <option value="bear_put_spread">Bear Put Spread</option>
+                    <option value="bull_put_spread">Bull Put Spread (Credit)</option>
+                    <option value="bear_call_spread">Bear Call Spread (Credit)</option>
+                    <option value="long_straddle">Long Straddle</option>
+                    <option value="short_straddle">Short Straddle</option>
+                    <option value="long_strangle">Long Strangle</option>
+                    <option value="short_strangle">Short Strangle</option>
+                    <option value="iron_condor">Iron Condor</option>
+                    <option value="iron_butterfly">Iron Butterfly</option>
+                </select>
+            </div>
+            <div>
+                <label class="spec-label">Expiration (all legs)</label>
+                <select id="strategy-expiration" 
+                        onchange="SpecApp.onExpirationChange()"
+                        class="spec-input"
+                        style="min-width: 160px;">
+                    <!-- Populated dynamically -->
+                </select>
+            </div>
+        </div>
+
+        <!-- Legs Container -->
+        <div id="legs-container" style="margin-bottom: 1rem;">
+            <!-- Leg inputs will be added here dynamically -->
+        </div>
+        
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button onclick="SpecApp.addLeg()" class="btn btn-secondary">+ Add Leg</button>
+            <button onclick="SpecApp.fetchAllQuotes()" class="btn btn-secondary" title="Fetch quotes for all legs in one request">Refresh Quotes</button>
+            <button onclick="SpecApp.analyzeStrategy()" class="btn btn-primary">Analyze Strategy</button>
+        </div>
+    </div>
+</div>
+
+<!-- Analysis Results (shown after analysis) -->
+<div id="analysis-results" style="display: none;">
+    <h2 style="margin-bottom: 1rem;">Analysis Results</h2>
+    
+    <div class="stats-grid" style="margin-bottom: 1.5rem;">
+        <div class="stat-card">
+            <div class="label">Strategy</div>
+            <div class="value" id="result-strategy" style="font-size: 1.1rem;">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Net Premium</div>
+            <div class="value" id="result-net-premium">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Max Profit</div>
+            <div class="value positive" id="result-max-profit">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Max Loss</div>
+            <div class="value negative" id="result-max-loss">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Breakeven</div>
+            <div class="value" id="result-breakeven" style="color: #a855f7;">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Days to Expiry</div>
+            <div class="value" id="result-dte">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Profit Probability</div>
+            <div class="value" id="result-profit-prob">--</div>
+        </div>
+    </div>
+
+    <!-- Legs Summary -->
+    <div class="stat-card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem; color: #e0e0e0;">Legs Summary</h3>
+        <table id="legs-summary-table">
+            <thead>
+                <tr>
+                    <th>Action</th>
+                    <th>Type</th>
+                    <th>Strike</th>
+                    <th>Expiration</th>
+                    <th>Qty</th>
+                    <th>Premium</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Risk</th>
+                </tr>
+            </thead>
+            <tbody id="legs-summary-body">
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Exit Scenario Analysis Section -->
+    <div id="exit-scenarios-section" class="stat-card" style="margin-bottom: 1.5rem; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <h3 style="margin: 0; color: #e0e0e0;">Exit Scenario Analysis</h3>
+            <button onclick="SpecApp.toggleExitScenarios()" class="quote-btn">Toggle Details</button>
+        </div>
+        
+        <div id="exit-scenarios-content">
+            <!-- Volatility Input -->
+            <div style="margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">
+                <label style="color: #888; font-size: 0.8rem;">Implied Volatility:</label>
+                <input type="number" 
+                       step="1" 
+                       min="5" 
+                       max="200"
+                       id="exit-volatility"
+                       class="spec-input"
+                       style="width: 70px; text-align: center;">
+                <span style="color: #666; font-size: 0.8rem;">%</span>
+            </div>
+            
+            <!-- Per-Leg Exit Calculators -->
+            <div id="leg-exit-calculators"></div>
+        </div>
+    </div>
+    
+    <!-- 50% Assignment Price Indicators -->
+    <div id="assignment-price-indicators" style="display: none;"></div>
+
+    <!-- Charts -->
+    <div class="charts-grid">
+        <div class="chart-container full-width" id="pnl-chart-container">
+            <div id="pnl-chart"></div>
+        </div>
+        <div class="chart-container full-width" id="theta-chart-container" style="display: none;">
+            <div style="margin-bottom: 0.5rem;">
+                <span style="color: #888; font-size: 0.85rem;">
+                    Time Decay (Theta): Shows how P&L changes as expiration approaches
+                </span>
+            </div>
+            <div id="theta-chart"></div>
+        </div>
+    </div>
+
+    <!-- P&L Table -->
+    <div class="stat-card" style="margin-top: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem; color: #e0e0e0;">P&L Scenarios at Expiration</h3>
+        <div style="max-height: 400px; overflow-y: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Underlying Price</th>
+                        <th>P&L</th>
+                        <th>% Return</th>
+                    </tr>
+                </thead>
+                <tbody id="scenarios-table-body">
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// Speculation App - Module pattern to avoid global pollution
+const SpecApp = (function() {
+    'use strict';
+    
+    // Constants
+    const CONSTANTS = {
+        DEBOUNCE_MS: 400,
+        MAX_PROFIT_UNLIMITED: 999999,
+        MAX_LOSS_UNLIMITED: -999999,
+        DEFAULT_IV: 0.30,
+        QUOTE_CACHE_TTL_MS: 5 * 60 * 1000,  // 5 minutes
+    };
+    
+    // Strategy templates (could be fetched from server)
+    const STRATEGY_TEMPLATES = {
+        'long_call': [{action: 'BUY', type: 'CALL', offset: 0}],
+        'long_put': [{action: 'BUY', type: 'PUT', offset: 0}],
+        'short_put': [{action: 'SELL', type: 'PUT', offset: 0}],
+        'short_call': [{action: 'SELL', type: 'CALL', offset: 0}],
+        'bull_call_spread': [
+            {action: 'BUY', type: 'CALL', offset: 0},
+            {action: 'SELL', type: 'CALL', offset: 5}
+        ],
+        'bear_put_spread': [
+            {action: 'BUY', type: 'PUT', offset: 0},
+            {action: 'SELL', type: 'PUT', offset: -5}
+        ],
+        'bull_put_spread': [
+            {action: 'SELL', type: 'PUT', offset: 0},
+            {action: 'BUY', type: 'PUT', offset: -5}
+        ],
+        'bear_call_spread': [
+            {action: 'SELL', type: 'CALL', offset: 0},
+            {action: 'BUY', type: 'CALL', offset: 5}
+        ],
+        'long_straddle': [
+            {action: 'BUY', type: 'CALL', offset: 0},
+            {action: 'BUY', type: 'PUT', offset: 0}
+        ],
+        'short_straddle': [
+            {action: 'SELL', type: 'CALL', offset: 0},
+            {action: 'SELL', type: 'PUT', offset: 0}
+        ],
+        'long_strangle': [
+            {action: 'BUY', type: 'CALL', offset: 5},
+            {action: 'BUY', type: 'PUT', offset: -5}
+        ],
+        'short_strangle': [
+            {action: 'SELL', type: 'CALL', offset: 5},
+            {action: 'SELL', type: 'PUT', offset: -5}
+        ],
+        'iron_condor': [
+            {action: 'SELL', type: 'PUT', offset: -5},
+            {action: 'BUY', type: 'PUT', offset: -10},
+            {action: 'SELL', type: 'CALL', offset: 5},
+            {action: 'BUY', type: 'CALL', offset: 10}
+        ],
+        'iron_butterfly': [
+            {action: 'SELL', type: 'PUT', offset: 0},
+            {action: 'BUY', type: 'PUT', offset: -5},
+            {action: 'SELL', type: 'CALL', offset: 0},
+            {action: 'BUY', type: 'CALL', offset: 5}
+        ]
+    };
+    
+    // Private state
+    let state = {
+        symbolData: null,
+        legCounter: 0,
+        quoteCache: new Map(),
+        analysisData: null,
+        pendingQuoteFetch: null,
+        debounceTimers: new Map()
+    };
+    
+    // Utility functions
+    function debounce(fn, key, delay = CONSTANTS.DEBOUNCE_MS) {
+        if (state.debounceTimers.has(key)) {
+            clearTimeout(state.debounceTimers.get(key));
+        }
+        state.debounceTimers.set(key, setTimeout(fn, delay));
+    }
+    
+    function formatCurrency(value, decimals = 2) {
+        if (value === null || value === undefined) return '--';
+        return '$' + value.toLocaleString('en-US', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
+    }
+    
+    function formatPercent(value, decimals = 1) {
+        if (value === null || value === undefined) return '--';
+        return value.toFixed(decimals) + '%';
+    }
+    
+    function getProbabilityColor(prob) {
+        if (prob > 70) return '#22c55e';
+        if (prob > 40) return '#f59e0b';
+        return '#ef4444';
+    }
+    
+    function getAssignmentProbColor(prob) {
+        if (prob > 50) return '#ef4444';
+        if (prob > 25) return '#f59e0b';
+        return '#22c55e';
+    }
+    
+    function showError(elementId, message) {
+        const el = document.getElementById(elementId);
+        if (el) {
+            el.innerHTML = `<span class="error-text">${message}</span>`;
+            el.style.display = 'block';
+        }
+    }
+    
+    function showSuccess(elementId, message) {
+        const el = document.getElementById(elementId);
+        if (el) {
+            el.innerHTML = `<span class="success-text">${message}</span>`;
+            el.style.display = 'block';
+        }
+    }
+    
+    function showLoading(elementId, message = 'Loading...') {
+        const el = document.getElementById(elementId);
+        if (el) {
+            el.innerHTML = `<span class="loading-indicator">${message}</span>`;
+            el.style.display = 'block';
+        }
+    }
+    
+    // Build expiration options HTML
+    function buildExpirationOptions() {
+        const expirations = state.symbolData?.expirations || [];
+        
+        if (expirations.length === 0) {
+            const defaultDate = new Date();
+            defaultDate.setDate(defaultDate.getDate() + 30);
+            const dateStr = defaultDate.toISOString().split('T')[0];
+            return `<option value="${dateStr}">${dateStr}</option>`;
+        }
+        
+        return expirations.map(exp => `<option value="${exp}">${exp}</option>`).join('');
+    }
+    
+    // Get first expiration
+    function getFirstExpiration() {
+        const expirations = state.symbolData?.expirations || [];
+        if (expirations.length > 0) return expirations[0];
+        const defaultDate = new Date();
+        defaultDate.setDate(defaultDate.getDate() + 30);
+        return defaultDate.toISOString().split('T')[0];
+    }
+    
+    // Build leg HTML - single function for both add methods (no expiration - uses strategy-level)
+    function buildLegHtml(legId, config = {}) {
+        const action = config.action || 'BUY';
+        const type = config.type || 'CALL';
+        const strike = config.strike || (state.symbolData ? Math.round(state.symbolData.current_price) : 100);
+        const premium = config.premium || 0;
+        
+        return `
+            <div class="leg-row" id="leg-${legId}" data-leg-id="${legId}">
+                <div class="leg-row-field">
+                    <label class="spec-label">Action</label>
+                    <select id="leg-${legId}-action" class="spec-input">
+                        <option value="BUY" ${action === 'BUY' ? 'selected' : ''}>BUY</option>
+                        <option value="SELL" ${action === 'SELL' ? 'selected' : ''}>SELL</option>
+                    </select>
+                </div>
+                <div class="leg-row-field">
+                    <label class="spec-label">Type</label>
+                    <select id="leg-${legId}-type" class="spec-input" onchange="SpecApp.onLegChange(${legId})">
+                        <option value="CALL" ${type === 'CALL' ? 'selected' : ''}>CALL</option>
+                        <option value="PUT" ${type === 'PUT' ? 'selected' : ''}>PUT</option>
+                    </select>
+                </div>
+                <div class="leg-row-field">
+                    <label class="spec-label">Strike</label>
+                    <input type="number" id="leg-${legId}-strike" value="${strike}" step="0.5" min="0"
+                           class="spec-input" onchange="SpecApp.onLegChange(${legId})">
+                </div>
+                <div class="leg-row-field">
+                    <label class="spec-label">Qty</label>
+                    <input type="number" id="leg-${legId}-qty" value="1" min="1" max="100" class="spec-input">
+                </div>
+                <div class="leg-row-field">
+                    <div class="premium-header">
+                        <label class="spec-label">Premium</label>
+                        <button onclick="SpecApp.fetchSingleQuote(${legId})" class="quote-btn" title="Fetch quote">Quote</button>
+                    </div>
+                    <input type="number" id="leg-${legId}-premium" value="${premium.toFixed(2)}" step="0.01" min="0" class="spec-input">
+                    <div id="leg-${legId}-quote" class="quote-display"></div>
+                </div>
+                <div class="leg-row-field" style="justify-content: flex-end;">
+                    <button onclick="SpecApp.removeLeg(${legId})" class="remove-btn">X</button>
+                </div>
+            </div>
+        `;
+    }
+    
+    // Public API
+    return {
+        // Get current strategy expiration
+        getExpiration() {
+            return document.getElementById('strategy-expiration')?.value || getFirstExpiration();
+        },
+        
+        // Populate expiration dropdown
+        populateExpirations() {
+            const select = document.getElementById('strategy-expiration');
+            if (!select) return;
+            select.innerHTML = buildExpirationOptions();
+        },
+        
+        // Handle expiration change - refresh all quotes
+        onExpirationChange() {
+            state.quoteCache.clear();  // Clear cache since expiration changed
+            this.fetchAllQuotes();
+        },
+        
+        // Symbol lookup
+        async lookupSymbol() {
+            const input = document.getElementById('symbol-input');
+            const symbol = input.value.trim().toUpperCase();
+            
+            if (!symbol) {
+                showError('lookup-result', 'Please enter a symbol');
+                return;
+            }
+            
+            showLoading('lookup-result', `Looking up ${symbol}...`);
+            
+            try {
+                const response = await fetch(`/api/speculation/lookup?symbol=${symbol}`);
+                const data = await response.json();
+                
+                if (data.detail) {
+                    showError('lookup-result', `Error: ${data.detail}`);
+                    return;
+                }
+                
+                if (!data.current_price) {
+                    showError('lookup-result', `Could not get price for ${symbol}`);
+                    return;
+                }
+                
+                state.symbolData = data;
+                state.quoteCache.clear();
+                
+                showSuccess('lookup-result', `Found ${symbol} - ${formatCurrency(data.current_price)}`);
+                
+                // Update stats display
+                document.getElementById('current-price').textContent = formatCurrency(data.current_price);
+                
+                const priceChange = document.getElementById('price-change');
+                if (data.price_change_percent !== null) {
+                    const sign = data.price_change_percent >= 0 ? '+' : '';
+                    const cls = data.price_change_percent >= 0 ? 'positive' : 'negative';
+                    priceChange.innerHTML = `<span class="${cls}">${sign}${formatPercent(data.price_change_percent)}</span>`;
+                } else {
+                    priceChange.textContent = '';
+                }
+                
+                document.getElementById('iv-value').textContent = data.implied_volatility ? 
+                    formatPercent(data.implied_volatility * 100, 1) : '--';
+                document.getElementById('iv-rank').textContent = data.iv_rank ? 
+                    data.iv_rank.toFixed(0) : '--';
+                document.getElementById('max-pain').textContent = data.max_pain ? 
+                    formatCurrency(data.max_pain) : '--';
+                document.getElementById('put-call-ratio').textContent = data.put_call_ratio ? 
+                    data.put_call_ratio.toFixed(2) : '--';
+                
+                document.getElementById('symbol-data').style.display = 'block';
+                
+                // Populate expiration dropdown
+                this.populateExpirations();
+                
+                // Clear existing legs and add one default
+                document.getElementById('legs-container').innerHTML = '';
+                state.legCounter = 0;
+                this.addLeg();
+                
+            } catch (error) {
+                showError('lookup-result', `Error: ${error.message}`);
+            }
+        },
+        
+        // Add a new leg
+        addLeg(config = {}) {
+            state.legCounter++;
+            const container = document.getElementById('legs-container');
+            container.insertAdjacentHTML('beforeend', buildLegHtml(state.legCounter, config));
+        },
+        
+        // Remove a leg
+        removeLeg(legId) {
+            const el = document.getElementById(`leg-${legId}`);
+            if (el) el.remove();
+        },
+        
+        // Handle leg parameter changes (debounced)
+        onLegChange(legId) {
+            debounce(() => this.fetchSingleQuote(legId), `leg-${legId}`);
+        },
+        
+        // Fetch quote for a single leg
+        async fetchSingleQuote(legId) {
+            if (!state.symbolData) return;
+            
+            const expiration = this.getExpiration();
+            const strike = parseFloat(document.getElementById(`leg-${legId}-strike`)?.value);
+            const type = document.getElementById(`leg-${legId}-type`)?.value;
+            
+            if (!expiration || isNaN(strike)) return;
+            
+            const cacheKey = `${state.symbolData.symbol}:${expiration}:${strike}:${type}`;
+            const cached = state.quoteCache.get(cacheKey);
+            
+            if (cached && (Date.now() - cached.timestamp < CONSTANTS.QUOTE_CACHE_TTL_MS)) {
+                this.displayQuote(legId, cached.quote);
+                return;
+            }
+            
+            const quoteDiv = document.getElementById(`leg-${legId}-quote`);
+            if (quoteDiv) quoteDiv.innerHTML = '<span class="loading-indicator">...</span>';
+            
+            // Use batch API even for single quote (more consistent)
+            try {
+                const response = await fetch('/api/speculation/quotes-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        contracts: [{
+                            symbol: state.symbolData.symbol,
+                            expiration: expiration,
+                            strike: strike,
+                            option_type: type
+                        }]
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.quotes && data.quotes.length > 0) {
+                    const quote = data.quotes[0];
+                    state.quoteCache.set(cacheKey, {quote, timestamp: Date.now()});
+                    this.displayQuote(legId, quote);
+                } else {
+                    if (quoteDiv) quoteDiv.innerHTML = '<span style="color: #666;">No quote</span>';
+                }
+            } catch (error) {
+                console.error('Quote fetch error:', error);
+                if (quoteDiv) quoteDiv.innerHTML = '<span style="color: #666;">Error</span>';
+            }
+        },
+        
+        // Fetch quotes for ALL legs in one batch request
+        async fetchAllQuotes() {
+            if (!state.symbolData) return;
+            
+            const legRows = document.querySelectorAll('.leg-row');
+            if (legRows.length === 0) return;
+            
+            const expiration = this.getExpiration();
+            const contracts = [];
+            const legIds = [];
+            
+            legRows.forEach(row => {
+                const legId = row.dataset.legId;
+                const strike = parseFloat(document.getElementById(`leg-${legId}-strike`)?.value);
+                const type = document.getElementById(`leg-${legId}-type`)?.value;
+                
+                if (!isNaN(strike)) {
+                    contracts.push({
+                        symbol: state.symbolData.symbol,
+                        expiration: expiration,
+                        strike: strike,
+                        option_type: type
+                    });
+                    legIds.push(legId);
+                    
+                    // Show loading
+                    const quoteDiv = document.getElementById(`leg-${legId}-quote`);
+                    if (quoteDiv) quoteDiv.innerHTML = '<span class="loading-indicator">...</span>';
+                }
+            });
+            
+            if (contracts.length === 0) return;
+            
+            try {
+                const response = await fetch('/api/speculation/quotes-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({contracts})
+                });
+                
+                const data = await response.json();
+                
+                if (data.quotes) {
+                    data.quotes.forEach((quote, i) => {
+                        if (quote && legIds[i]) {
+                            const c = contracts[i];
+                            const cacheKey = `${c.symbol}:${c.expiration}:${c.strike}:${c.option_type}`;
+                            state.quoteCache.set(cacheKey, {quote, timestamp: Date.now()});
+                            this.displayQuote(legIds[i], quote);
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Batch quote fetch error:', error);
+                legIds.forEach(legId => {
+                    const quoteDiv = document.getElementById(`leg-${legId}-quote`);
+                    if (quoteDiv) quoteDiv.innerHTML = '<span style="color: #666;">Error</span>';
+                });
+            }
+        },
+        
+        // Display quote data
+        displayQuote(legId, quote) {
+            const quoteDiv = document.getElementById(`leg-${legId}-quote`);
+            const premiumInput = document.getElementById(`leg-${legId}-premium`);
+            
+            if (!quoteDiv) return;
+            
+            let html = '';
+            if (quote.bid !== null) html += `<span class="quote-bid">B:${quote.bid.toFixed(2)}</span> `;
+            if (quote.mid !== null) html += `<span class="quote-mid">M:${quote.mid.toFixed(2)}</span> `;
+            if (quote.ask !== null) html += `<span class="quote-ask">A:${quote.ask.toFixed(2)}</span>`;
+            if (quote.last !== null && quote.bid === null) html += `<span class="quote-last">L:${quote.last.toFixed(2)}</span>`;
+            
+            if (quote.implied_volatility !== null) {
+                html += `<br><span style="color: #666; font-size: 0.65rem;">IV:${(quote.implied_volatility * 100).toFixed(0)}%</span>`;
+            }
+            
+            quoteDiv.innerHTML = html || '<span style="color: #666;">No data</span>';
+            
+            // Auto-fill premium
+            if (premiumInput) {
+                premiumInput.classList.remove('premium-chain', 'premium-quote', 'premium-last');
+                if (quote.mid !== null) {
+                    premiumInput.value = quote.mid.toFixed(2);
+                    premiumInput.classList.add('premium-quote');
+                    premiumInput.title = `Mid: ${quote.mid} (Bid: ${quote.bid}, Ask: ${quote.ask})`;
+                } else if (quote.last !== null) {
+                    premiumInput.value = quote.last.toFixed(2);
+                    premiumInput.classList.add('premium-last');
+                    premiumInput.title = `Last traded: ${quote.last}`;
+                }
+            }
+        },
+        
+        // Apply strategy template
+        applyStrategyTemplate() {
+            const templateId = document.getElementById('strategy-template').value;
+            if (!templateId || !STRATEGY_TEMPLATES[templateId]) return;
+            
+            const template = STRATEGY_TEMPLATES[templateId];
+            const baseStrike = state.symbolData ? Math.round(state.symbolData.current_price) : 100;
+            
+            document.getElementById('legs-container').innerHTML = '';
+            state.legCounter = 0;
+            
+            template.forEach(legDef => {
+                this.addLeg({
+                    action: legDef.action,
+                    type: legDef.type,
+                    strike: baseStrike + legDef.offset
+                });
+            });
+            
+            // Fetch all quotes after a short delay
+            setTimeout(() => this.fetchAllQuotes(), 200);
+        },
+        
+        // Collect legs data
+        collectLegs() {
+            const legRows = document.querySelectorAll('.leg-row');
+            const legs = [];
+            const expiration = this.getExpiration();
+            
+            legRows.forEach(row => {
+                const id = row.dataset.legId;
+                const action = document.getElementById(`leg-${id}-action`)?.value;
+                const type = document.getElementById(`leg-${id}-type`)?.value;
+                const strike = parseFloat(document.getElementById(`leg-${id}-strike`)?.value);
+                const qty = parseInt(document.getElementById(`leg-${id}-qty`)?.value) || 1;
+                const premium = parseFloat(document.getElementById(`leg-${id}-premium`)?.value) || 0;
+                
+                if (strike > 0 && expiration) {
+                    legs.push({
+                        option_type: type,
+                        strike: strike,
+                        expiration: expiration,
+                        action: action,
+                        quantity: qty,
+                        premium: premium
+                    });
+                }
+            });
+            
+            return legs;
+        },
+        
+        // Analyze strategy
+        async analyzeStrategy() {
+            if (!state.symbolData) {
+                alert('Please lookup a symbol first');
+                return;
+            }
+            
+            const legs = this.collectLegs();
+            if (legs.length === 0) {
+                alert('Please add at least one leg');
+                return;
+            }
+            
+            const templateSelect = document.getElementById('strategy-template');
+            const strategyName = templateSelect.selectedIndex > 0 ? 
+                templateSelect.options[templateSelect.selectedIndex].text : 
+                'Custom Strategy';
+            
+            document.getElementById('analysis-results').style.display = 'block';
+            document.getElementById('result-strategy').textContent = 'Analyzing...';
+            
+            try {
+                const response = await fetch('/api/speculation/analyze', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        symbol: state.symbolData.symbol,
+                        strategy_name: strategyName,
+                        legs: legs,
+                        implied_volatility: state.symbolData.implied_volatility
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.detail) {
+                    alert('Error: ' + data.detail);
+                    document.getElementById('analysis-results').style.display = 'none';
+                    return;
+                }
+                
+                state.analysisData = data;
+                this.displayResults(data);
+                
+            } catch (error) {
+                alert('Error: ' + error.message);
+                document.getElementById('analysis-results').style.display = 'none';
+            }
+        },
+        
+        // Display analysis results
+        displayResults(data) {
+            document.getElementById('result-strategy').textContent = data.strategy_name;
+            
+            const netPremium = document.getElementById('result-net-premium');
+            netPremium.textContent = formatCurrency(data.net_premium);
+            netPremium.className = 'value ' + (data.net_premium >= 0 ? 'positive' : 'negative');
+            
+            document.getElementById('result-max-profit').textContent = 
+                data.max_profit > CONSTANTS.MAX_PROFIT_UNLIMITED ? 'Unlimited' : formatCurrency(data.max_profit);
+            
+            document.getElementById('result-max-loss').textContent = 
+                data.max_loss < CONSTANTS.MAX_LOSS_UNLIMITED ? 'Unlimited' : formatCurrency(data.max_loss);
+            
+            const breakevens = data.breakeven_prices.map(be => formatCurrency(be)).join(', ');
+            document.getElementById('result-breakeven').textContent = breakevens || 'N/A';
+            
+            document.getElementById('result-dte').textContent = `${data.days_to_expiry}d`;
+            
+            const profitProb = document.getElementById('result-profit-prob');
+            if (data.profit_probability !== null) {
+                profitProb.textContent = formatPercent(data.profit_probability);
+                profitProb.className = 'value ' + (data.profit_probability >= 50 ? 'positive' : 'negative');
+            } else {
+                profitProb.textContent = '--';
+                profitProb.className = 'value';
+            }
+            
+            // Populate legs summary
+            const tbody = document.getElementById('legs-summary-body');
+            tbody.innerHTML = data.legs.map(leg => {
+                let statusHtml = '--';
+                if (leg.itm !== null && leg.itm !== undefined) {
+                    const statusClass = leg.itm ? 'error-text' : 'success-text';
+                    const statusText = leg.itm ? 'ITM' : 'OTM';
+                    statusHtml = `<span class="${statusClass}">${statusText}</span> <span style="color: #888; font-size: 0.8rem;">(${leg.distance_to_strike_pct.toFixed(1)}%)</span>`;
+                }
+                
+                let riskHtml = '--';
+                if (leg.assignment_probability !== null && leg.assignment_probability !== undefined) {
+                    const color = getAssignmentProbColor(leg.assignment_probability);
+                    riskHtml = `<span style="color: ${color}; font-weight: 600;">${leg.assignment_probability.toFixed(0)}%</span>`;
+                }
+                
+                return `
+                    <tr>
+                        <td><span class="tag ${leg.action === 'BUY' ? 'open' : 'assigned'}">${leg.action}</span></td>
+                        <td>${leg.option_type}</td>
+                        <td>${formatCurrency(leg.strike)}</td>
+                        <td>${leg.expiration}</td>
+                        <td>${leg.quantity}</td>
+                        <td>${formatCurrency(leg.premium)}</td>
+                        <td class="${leg.total_premium >= 0 ? 'positive' : 'negative'}">${formatCurrency(leg.total_premium)}</td>
+                        <td>${statusHtml}</td>
+                        <td>${riskHtml}</td>
+                    </tr>
+                `;
+            }).join('');
+            
+            // Build exit calculators
+            this.buildExitScenarioCalculators(data);
+            this.build50PctAssignmentIndicators(data);
+            
+            // Set volatility input
+            const volInput = document.getElementById('exit-volatility');
+            if (volInput) {
+                volInput.value = data.implied_volatility ? Math.round(data.implied_volatility * 100) : 30;
+            }
+            
+            // Render charts using Bokeh's embed API (safer than eval)
+            this.renderCharts(data.charts);
+            
+            // Populate scenarios table
+            const scenariosTbody = document.getElementById('scenarios-table-body');
+            const sampled = data.scenarios.filter((_, i) => i % 5 === 0 || i === data.scenarios.length - 1);
+            scenariosTbody.innerHTML = sampled.map(s => `
+                <tr>
+                    <td>${formatCurrency(s.underlying_price)}</td>
+                    <td class="${s.pnl >= 0 ? 'positive' : 'negative'}">${formatCurrency(s.pnl)}</td>
+                    <td style="color: #888;">${formatPercent(s.pnl_percent)}</td>
+                </tr>
+            `).join('');
+            
+            document.getElementById('analysis-results').scrollIntoView({behavior: 'smooth'});
+        },
+        
+        // Render Bokeh charts (safer alternative to eval)
+        renderCharts(charts) {
+            if (charts.pnl_script && charts.pnl_div) {
+                document.getElementById('pnl-chart').innerHTML = charts.pnl_div;
+                // Execute script in a controlled way
+                const script = document.createElement('script');
+                script.textContent = charts.pnl_script.replace(/<script[^>]*>|<\/script>/g, '');
+                document.getElementById('pnl-chart').appendChild(script);
+            }
+            
+            const thetaContainer = document.getElementById('theta-chart-container');
+            if (charts.theta_script && charts.theta_div) {
+                thetaContainer.style.display = 'block';
+                document.getElementById('theta-chart').innerHTML = charts.theta_div;
+                const script = document.createElement('script');
+                script.textContent = charts.theta_script.replace(/<script[^>]*>|<\/script>/g, '');
+                document.getElementById('theta-chart').appendChild(script);
+            } else {
+                thetaContainer.style.display = 'none';
+            }
+        },
+        
+        // Build exit scenario calculators
+        buildExitScenarioCalculators(data) {
+            const container = document.getElementById('leg-exit-calculators');
+            const section = document.getElementById('exit-scenarios-section');
+            
+            if (!data.legs || data.legs.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+            
+            section.style.display = 'block';
+            
+            container.innerHTML = data.legs.map((leg, index) => `
+                <div class="exit-calc-card">
+                    <div style="margin-bottom: 0.5rem; color: #e0e0e0; font-size: 0.9rem;">
+                        <span class="tag ${leg.action === 'BUY' ? 'open' : 'assigned'}">${leg.action}</span>
+                        <strong>${leg.option_type}</strong> ${formatCurrency(leg.strike)} - ${leg.expiration}
+                        <span style="color: #888; margin-left: 0.5rem;">Qty: ${leg.quantity}</span>
+                    </div>
+                    
+                    <div class="exit-calc-grid">
+                        <div>
+                            <label class="spec-label">Close at option price ($/share):</label>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <input type="number" step="0.01" min="0" placeholder="e.g. 0.50"
+                                       id="close-price-${index}" class="spec-input" style="flex: 1;">
+                                <button onclick="SpecApp.calculateExit(${index}, 'close')" class="calc-btn-blue">Calc</button>
+                            </div>
+                            <div id="close-result-${index}" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+                        </div>
+                        
+                        <div>
+                            <label class="spec-label">Assignment at underlying price:</label>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <input type="number" step="0.01" min="0" placeholder="${formatCurrency(leg.strike)}"
+                                       id="assign-price-${index}" class="spec-input" style="flex: 1;">
+                                <button onclick="SpecApp.calculateExit(${index}, 'assign')" class="calc-btn-orange">Calc</button>
+                            </div>
+                            <div id="assign-result-${index}" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        },
+        
+        // Build 50% assignment indicators
+        build50PctAssignmentIndicators(data) {
+            const container = document.getElementById('assignment-price-indicators');
+            const shortLegs = data.legs.filter(leg => leg.action === 'SELL' && leg.price_at_50pct_assignment !== null);
+            
+            if (shortLegs.length === 0) {
+                container.style.display = 'none';
+                return;
+            }
+            
+            container.style.display = 'block';
+            container.innerHTML = `
+                <div class="stat-card" style="margin-bottom: 1.5rem;">
+                    <h3 style="margin-bottom: 0.75rem; color: #e0e0e0;">50% Assignment Risk Levels</h3>
+                    ${shortLegs.map(leg => {
+                        const price50 = leg.price_at_50pct_assignment;
+                        const diff = data.current_price - price50;
+                        const diffPct = (diff / price50) * 100;
+                        return `
+                            <div style="margin-bottom: 0.5rem; padding: 0.5rem; background-color: #2a2520; border-radius: 4px; border-left: 3px solid #f97316;">
+                                <span style="color: #888; font-size: 0.85rem;">
+                                    ${leg.option_type} ${formatCurrency(leg.strike)} (${leg.expiration}):
+                                </span>
+                                <span style="color: #f97316; font-size: 0.85rem; margin-left: 0.5rem;">
+                                    50% Risk at: <strong>${formatCurrency(price50)}</strong>
+                                </span>
+                                <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">
+                                    (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(1)}% from current)
+                                </span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        },
+        
+        // Toggle exit scenarios visibility
+        toggleExitScenarios() {
+            const content = document.getElementById('exit-scenarios-content');
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+        },
+        
+        // Calculate exit scenario
+        async calculateExit(legIndex, type) {
+            const data = state.analysisData;
+            if (!data || !data.legs || !data.legs[legIndex]) {
+                alert('No analysis data available. Please analyze a strategy first.');
+                return;
+            }
+            
+            const leg = data.legs[legIndex];
+            const volInput = document.getElementById('exit-volatility');
+            const volatility = (volInput ? parseFloat(volInput.value) : 30) / 100;
+            
+            let resultDiv, url;
+            const baseUrl = `/api/speculation/calculate-exit?option_type=${leg.option_type}&action=${leg.action}&strike=${leg.strike}&premium=${leg.premium}&quantity=${leg.quantity}&days_to_expiry=${leg.days_to_expiry}&current_price=${data.current_price}&volatility=${volatility}`;
+            
+            if (type === 'close') {
+                const closePrice = parseFloat(document.getElementById(`close-price-${legIndex}`)?.value);
+                if (!closePrice || closePrice <= 0) {
+                    alert('Please enter a valid close price');
+                    return;
+                }
+                url = baseUrl + `&close_price=${closePrice}`;
+                resultDiv = document.getElementById(`close-result-${legIndex}`);
+            } else {
+                const assignPrice = parseFloat(document.getElementById(`assign-price-${legIndex}`)?.value);
+                if (!assignPrice || assignPrice <= 0) {
+                    alert('Please enter a valid assignment price');
+                    return;
+                }
+                url = baseUrl + `&assignment_price=${assignPrice}`;
+                resultDiv = document.getElementById(`assign-result-${legIndex}`);
+            }
+            
+            resultDiv.innerHTML = '<span class="loading-indicator">Calculating...</span>';
+            
+            try {
+                const response = await fetch(url);
+                const result = await response.json();
+                
+                if (result.error) {
+                    resultDiv.innerHTML = `<span class="error-text">Error: ${result.error}</span>`;
+                    return;
+                }
+                
+                if (type === 'close' && result.close_scenario) {
+                    const s = result.close_scenario;
+                    resultDiv.innerHTML = `
+                        <div class="result-card">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #888;">P&L:</span>
+                                <span class="${s.pnl >= 0 ? 'positive' : 'negative'}" style="font-weight: 600;">${formatCurrency(s.pnl)}</span>
+                            </div>
+                            ${s.probability !== null ? `
+                                <div style="display: flex; justify-content: space-between; margin-top: 0.25rem;">
+                                    <span style="color: #888;">Likelihood:</span>
+                                    <span style="color: ${getProbabilityColor(s.probability)}; font-weight: 600;">${formatPercent(s.probability)}</span>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                } else if (type === 'assign' && result.assignment_scenario) {
+                    const s = result.assignment_scenario;
+                    resultDiv.innerHTML = `
+                        <div class="result-card">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #888;">P&L:</span>
+                                <span class="${s.pnl >= 0 ? 'positive' : 'negative'}" style="font-weight: 600;">${formatCurrency(s.pnl)}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin-top: 0.25rem;">
+                                <span style="color: #888;">Assign Prob:</span>
+                                <span style="color: ${getAssignmentProbColor(s.assignment_probability)}; font-weight: 600;">${formatPercent(s.assignment_probability)}</span>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = '<span style="color: #666;">No result</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error-text">Error: ${error.message}</span>`;
+            }
+        }
+    };
+})();
+</script>
+{% endblock %}

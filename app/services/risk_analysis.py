@@ -46,6 +46,55 @@ def _calculate_d1_d2(
     return d1, d2
 
 
+def calculate_option_price(
+    option_type: str,
+    spot: float,
+    strike: float,
+    days_to_expiry: int,
+    volatility: float = DEFAULT_VOLATILITY,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE
+) -> float:
+    """
+    Calculate theoretical Black-Scholes option price.
+    
+    Args:
+        option_type: "CALL" or "PUT"
+        spot: Current underlying price
+        strike: Strike price
+        days_to_expiry: Days until expiration
+        volatility: Implied volatility (annualized, as decimal e.g. 0.30 for 30%)
+        risk_free_rate: Risk-free interest rate
+    
+    Returns:
+        Theoretical option price per share
+    """
+    if days_to_expiry <= 0:
+        # At expiry, return intrinsic value
+        if option_type.upper() == "CALL":
+            return max(0, spot - strike)
+        else:
+            return max(0, strike - spot)
+    
+    if spot <= 0 or strike <= 0 or volatility <= 0:
+        return 0.0
+    
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+    
+    try:
+        d1, d2 = _calculate_d1_d2(spot, strike, T, risk_free_rate, volatility)
+        
+        if option_type.upper() == "CALL":
+            # Call = S * N(d1) - K * e^(-rT) * N(d2)
+            price = spot * _norm_cdf(d1) - strike * math.exp(-risk_free_rate * T) * _norm_cdf(d2)
+        else:
+            # Put = K * e^(-rT) * N(-d2) - S * N(-d1)
+            price = strike * math.exp(-risk_free_rate * T) * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
+        
+        return max(0, price)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def _calculate_price_probability(
     current_price: float,
     target_price: float,
@@ -154,9 +203,13 @@ def calculate_price_at_delta(
     volatility: float = DEFAULT_VOLATILITY
 ) -> Optional[float]:
     """
-    Calculate the underlying price where delta equals target value.
-    For puts, this is where assignment probability = target_delta.
-    For calls, this is where the call would have target_delta ITM probability.
+    Calculate the underlying price where assignment probability equals target value.
+    
+    Uses d2 (not d1) for consistency with _estimate_delta() which calculates
+    assignment probability as N(d2) for calls and N(-d2) for puts.
+    
+    For puts: We want N(-d2) = target_delta, so solve for S where d2 = -norm.ppf(target_delta)
+    For calls: We want N(d2) = target_delta, so solve for S where d2 = norm.ppf(target_delta)
     
     Returns the price at which assignment probability equals target_delta.
     """
@@ -167,27 +220,31 @@ def calculate_price_at_delta(
     T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
     
     try:
-        # Solve for S where N(d1) = target_delta for calls
-        # or N(-d1) = target_delta for puts
         from scipy.stats import norm
         
-        if option_type == "PUT":
-            # For puts: N(-d1) = target_delta, so -d1 = norm.ppf(target_delta)
-            d1 = -norm.ppf(target_delta)
-        else:
-            # For calls: N(d1) = target_delta
-            d1 = norm.ppf(target_delta)
+        # Solve for S where assignment probability = target_delta
+        # Assignment probability uses d2 (not d1):
+        #   - Calls: P(ITM) = N(d2), so d2 = norm.ppf(target_delta)
+        #   - Puts: P(ITM) = N(-d2), so -d2 = norm.ppf(target_delta), i.e., d2 = -norm.ppf(target_delta)
         
-        # d1 = (ln(S/K) + (r + σ²/2)T) / (σ√T)
+        if option_type == "PUT":
+            # For puts: N(-d2) = target_delta, so d2 = -norm.ppf(target_delta)
+            d2 = -norm.ppf(target_delta)
+        else:
+            # For calls: N(d2) = target_delta, so d2 = norm.ppf(target_delta)
+            d2 = norm.ppf(target_delta)
+        
+        # d2 = (ln(S/K) + (r - σ²/2)T) / (σ√T)
         # Solving for S:
-        # ln(S/K) = d1 * σ√T - (r + σ²/2)T
-        # S = K * exp(d1 * σ√T - (r + σ²/2)T)
-        exponent = d1 * volatility * math.sqrt(T) - (risk_free_rate + 0.5 * volatility ** 2) * T
+        # ln(S/K) = d2 * σ√T - (r - σ²/2)T
+        # S = K * exp(d2 * σ√T - (r - σ²/2)T)
+        sqrt_T = math.sqrt(T)
+        exponent = d2 * volatility * sqrt_T - (risk_free_rate - 0.5 * volatility ** 2) * T
         price = strike * math.exp(exponent)
         return price
     except ImportError:
         # Fallback without scipy - use approximation
-        # At 50% delta, price is approximately at strike adjusted for drift
+        # At 50% probability, price is approximately at strike adjusted for drift
         drift_adjustment = math.exp((risk_free_rate - 0.5 * volatility ** 2) * T)
         return strike * drift_adjustment
     except Exception:
@@ -259,6 +316,10 @@ class OpenPositionAnalysis:
     iv_rank: Optional[float] = None  # IV Rank (0-100)
     iv_percentile: Optional[float] = None  # IV Percentile (0-100)
     max_pain: Optional[float] = None  # Max pain price for this expiration
+    
+    # Calculation details for tooltips
+    iv_source: Optional[str] = None  # Where IV came from: "contract", "symbol", "default"
+    calc_details: Optional[dict] = None  # Contains d1, d2, T, etc. for tooltip display
 
 
 def calculate_option_pnl_at_expiry(
@@ -931,12 +992,28 @@ async def analyze_open_position(
             assignment_probability = round(assignment_probability * 100, 1)  # Convert to percentage
 
     # Calculate price at 50% assignment probability
+    calc_details = None
     if "SHORT" in strategy:
         price_at_50pct = calculate_price_at_delta(
             option_type, strike, days_to_expiry, target_delta=0.5, volatility=volatility
         )
         if price_at_50pct:
             price_at_50pct = round(price_at_50pct, 2)
+        
+        # Build calculation details for tooltip
+        if current_price and days_to_expiry > 0:
+            T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+            d1, d2 = _calculate_d1_d2(current_price, strike, T, DEFAULT_RISK_FREE_RATE, volatility)
+            drift_term = (0.5 * volatility ** 2 - DEFAULT_RISK_FREE_RATE) * T
+            
+            calc_details = {
+                "iv_percent": round(volatility * 100, 1),
+                "T_years": round(T, 4),
+                "d1": round(d1, 4),
+                "d2": round(d2, 4),
+                "drift_term": round(drift_term, 4),
+                "risk_free_rate": DEFAULT_RISK_FREE_RATE,
+            }
     
     # Generate exit scenarios with live volatility
     exit_scenarios = generate_exit_scenarios(
@@ -974,7 +1051,8 @@ async def analyze_open_position(
         exit_scenarios=exit_scenarios,
         assignment_probability=assignment_probability,
         price_at_50pct_assignment=price_at_50pct,
-        implied_volatility=volatility if live_volatility else None
+        implied_volatility=volatility if live_volatility else None,
+        calc_details=calc_details
     )
 
 
@@ -982,7 +1060,7 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
     """Get risk analysis for all open positions that haven't expired."""
     from datetime import date as date_type
     from app.services.price_service import get_multiple_prices
-    from app.services.stocknear_service import get_options_overview
+    from app.services.stocknear_service import get_options_overview, get_contract_quote
 
     today = date_type.today()
 
@@ -1009,8 +1087,7 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
     symbols = list(set(p.contract.symbol for p in valid_positions))
     quotes = await get_multiple_prices(symbols)
     
-    # Fetch options data (IV, etc.) for all unique symbols from StockNear
-    # This uses the cache so won't hit the API if data is fresh
+    # Fetch symbol-level options data as fallback
     options_data_by_symbol = {}
     for symbol in symbols:
         try:
@@ -1020,26 +1097,51 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
         except Exception as e:
             print(f"Warning: Could not fetch StockNear data for {symbol}: {e}")
 
-    # Analyze each position with current price data and live IV
+    # Analyze each position with current price data and contract-specific IV
     analyses = []
     for position in valid_positions:
         quote = quotes.get(position.contract.symbol)
         options_data = options_data_by_symbol.get(position.contract.symbol)
+        contract = position.contract
         
-        # Get live IV or fall back to default
+        # Try to get contract-specific IV first (most accurate)
         live_iv = None
+        iv_source = None
         iv_rank = None
         iv_percentile = None
-        if options_data:
+        
+        try:
+            # Format expiration for StockNear lookup (e.g., "Jul 18, 2025")
+            exp_str = contract.expiration.strftime("%b %d, %Y")
+            contract_quote = await get_contract_quote(
+                db, 
+                contract.symbol, 
+                exp_str, 
+                float(contract.strike), 
+                contract.option_type
+            )
+            if contract_quote and contract_quote.implied_volatility:
+                live_iv = contract_quote.implied_volatility
+                iv_source = "contract"
+        except Exception as e:
+            print(f"Warning: Could not fetch contract IV for {contract.contract_id}: {e}")
+        
+        # Fall back to symbol-level IV if contract-specific not available
+        if live_iv is None and options_data:
             live_iv = options_data.implied_volatility
+            iv_source = "symbol"
             iv_rank = options_data.iv_rank
             iv_percentile = options_data.iv_percentile
         
+        # Fall back to default if neither available
+        if live_iv is None:
+            iv_source = "default"
+        
         analysis = await analyze_open_position(db, position, quote, live_iv)
         
-        # Add StockNear-specific fields
+        # Add IV source info and StockNear-specific fields
+        analysis.iv_source = iv_source
         if options_data:
-            analysis.implied_volatility = live_iv
             analysis.iv_rank = iv_rank
             analysis.iv_percentile = iv_percentile
         

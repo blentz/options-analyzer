@@ -3,6 +3,103 @@
 {% block title %}Risk Analysis - Options Trading Analyzer{% endblock %}
 
 {% block content %}
+<style>
+/* Tooltip styles */
+.tooltip-container {
+    position: relative;
+    display: inline-block;
+    cursor: help;
+}
+
+.tooltip-container .tooltip-text {
+    visibility: hidden;
+    background-color: #1a1a1a;
+    color: #e0e0e0;
+    text-align: left;
+    border-radius: 6px;
+    padding: 10px 12px;
+    position: absolute;
+    z-index: 1000;
+    bottom: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 320px;
+    max-width: 400px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    border: 1px solid #444;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.tooltip-container .tooltip-text::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -6px;
+    border-width: 6px;
+    border-style: solid;
+    border-color: #444 transparent transparent transparent;
+}
+
+.tooltip-container:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+
+.tooltip-formula {
+    font-family: 'Courier New', monospace;
+    background-color: #252525;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin: 4px 0;
+    display: block;
+    white-space: nowrap;
+    overflow-x: auto;
+}
+
+.tooltip-label {
+    color: #888;
+    font-weight: normal;
+}
+
+.tooltip-value {
+    color: #22d3ee;
+    font-weight: 600;
+}
+
+.tooltip-section {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #333;
+}
+
+.iv-source-badge {
+    font-size: 0.65rem;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
+.iv-source-contract {
+    background-color: #22c55e33;
+    color: #22c55e;
+}
+
+.iv-source-symbol {
+    background-color: #f59e0b33;
+    color: #f59e0b;
+}
+
+.iv-source-default {
+    background-color: #ef444433;
+    color: #ef4444;
+}
+</style>
+
 <h1>Open Positions Risk Analysis</h1>
 
 {% if risk_summary.total_positions == 0 %}
@@ -159,13 +256,54 @@
             <div>
                 <span style="color: #666;">Assign Risk:</span>
                 {% if item.analysis.assignment_probability is not none %}
-                    {% if item.analysis.assignment_probability > 50 %}
-                    <span style="color: #ef4444; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
-                    {% elif item.analysis.assignment_probability > 25 %}
-                    <span style="color: #f59e0b; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
-                    {% else %}
-                    <span style="color: #22c55e;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
-                    {% endif %}
+                    <span class="tooltip-container">
+                        {% if item.analysis.assignment_probability > 50 %}
+                        <span style="color: #ef4444; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                        {% elif item.analysis.assignment_probability > 25 %}
+                        <span style="color: #f59e0b; font-weight: 600;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                        {% else %}
+                        <span style="color: #22c55e;">{{ "{:.0f}".format(item.analysis.assignment_probability) }}%</span>
+                        {% endif %}
+                        {% if item.analysis.implied_volatility %}
+                        <span class="iv-source-badge iv-source-{{ item.analysis.iv_source or 'symbol' }}">
+                            IV: {{ "{:.0f}".format(item.analysis.implied_volatility * 100) }}%
+                        </span>
+                        {% endif %}
+                        <span class="tooltip-text">
+                            <strong>Assignment Probability Calculation</strong>
+                            <div class="tooltip-section" style="margin-top: 4px; padding-top: 0; border-top: none;">
+                                <span class="tooltip-label">Formula:</span> P(ITM) = N(-d2) for PUTs
+                                <span class="tooltip-formula">d2 = (ln(S/K) + (r - σ²/2)T) / (σ√T)</span>
+                            </div>
+                            {% if item.analysis.calc_details %}
+                            <div class="tooltip-section">
+                                <span class="tooltip-label">Current Values:</span>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; margin-top: 4px;">
+                                    <span><span class="tooltip-label">S =</span> <span class="tooltip-value">${{ "{:.2f}".format(item.analysis.current_price) }}</span></span>
+                                    <span><span class="tooltip-label">K =</span> <span class="tooltip-value">${{ "{:.2f}".format(item.analysis.strike) }}</span></span>
+                                    <span><span class="tooltip-label">σ =</span> <span class="tooltip-value">{{ item.analysis.calc_details.iv_percent }}%</span></span>
+                                    <span><span class="tooltip-label">T =</span> <span class="tooltip-value">{{ item.analysis.calc_details.T_years }} yr</span></span>
+                                    <span><span class="tooltip-label">d1 =</span> <span class="tooltip-value">{{ item.analysis.calc_details.d1 }}</span></span>
+                                    <span><span class="tooltip-label">d2 =</span> <span class="tooltip-value">{{ item.analysis.calc_details.d2 }}</span></span>
+                                </div>
+                            </div>
+                            <div class="tooltip-section">
+                                <span class="tooltip-label">Result:</span>
+                                <span class="tooltip-formula">N(-d2) = N({{ "{:.4f}".format(-item.analysis.calc_details.d2) }}) = <span class="tooltip-value">{{ "{:.1f}".format(item.analysis.assignment_probability) }}%</span></span>
+                            </div>
+                            {% endif %}
+                            <div class="tooltip-section">
+                                <span class="tooltip-label">IV Source:</span>
+                                {% if item.analysis.iv_source == 'contract' %}
+                                <span style="color: #22c55e;">Contract-specific IV (most accurate)</span>
+                                {% elif item.analysis.iv_source == 'symbol' %}
+                                <span style="color: #f59e0b;">Symbol-level IV average</span>
+                                {% else %}
+                                <span style="color: #ef4444;">Default IV (30%)</span>
+                                {% endif %}
+                            </div>
+                        </span>
+                    </span>
                 {% else %}
                 <span style="color: #666;">--</span>
                 {% endif %}
@@ -237,13 +375,17 @@
                                step="1" 
                                min="5" 
                                max="200"
-                               value="30"
+                               value="{{ "{:.0f}".format((item.analysis.implied_volatility or 0.30) * 100) }}"
                                id="volatility-{{ loop.index }}"
                                style="width: 70px; padding: 0.3rem; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 0.85rem; text-align: center;"
                                onkeydown="return event.key !== '.'"
                                oninput="this.value = Math.round(this.value)">
                         <span style="color: #666; font-size: 0.8rem;">%</span>
-                        <span style="color: #666; font-size: 0.75rem; margin-left: 0.5rem;">(typical: 20-50% for stocks, higher for volatile names)</span>
+                        {% if item.analysis.iv_source %}
+                        <span class="iv-source-badge iv-source-{{ item.analysis.iv_source }}">
+                            {{ item.analysis.iv_source }}
+                        </span>
+                        {% endif %}
                     </div>
                     
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
@@ -297,16 +439,56 @@
         <!-- 50% Assignment Price Info -->
         {% if item.analysis.price_at_50pct_assignment is not none and 'SHORT' in item.analysis.strategy %}
         <div style="margin-top: 0.5rem; padding: 0.5rem; background-color: #2a2520; border-radius: 4px; border-left: 3px solid #f97316;">
-            <span style="color: #f97316; font-size: 0.85rem;">
+            <span class="tooltip-container" style="color: #f97316; font-size: 0.85rem;">
                 50% Assignment Risk at: <strong>${{ "{:.2f}".format(item.analysis.price_at_50pct_assignment) }}</strong>
-            </span>
-            {% if item.analysis.current_price is not none %}
-                {% set diff = item.analysis.current_price - item.analysis.price_at_50pct_assignment %}
-                {% set diff_pct = (diff / item.analysis.price_at_50pct_assignment) * 100 %}
-                <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">
-                    ({{ "{:+.1f}".format(diff_pct) }}% from current)
+                {% if item.analysis.current_price is not none %}
+                    {% set diff = item.analysis.current_price - item.analysis.price_at_50pct_assignment %}
+                    {% set diff_pct = (diff / item.analysis.price_at_50pct_assignment) * 100 %}
+                    <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">
+                        ({{ "{:+.1f}".format(diff_pct) }}% from current)
+                    </span>
+                {% endif %}
+                <span class="tooltip-text">
+                    <strong>50% Assignment Price Calculation</strong>
+                    <div class="tooltip-section" style="margin-top: 4px; padding-top: 0; border-top: none;">
+                        <span class="tooltip-label">For a PUT, 50% assignment means:</span>
+                        <span class="tooltip-formula">N(-d2) = 0.5 → d2 = 0</span>
+                    </div>
+                    <div class="tooltip-section">
+                        <span class="tooltip-label">Solving for S when d2 = 0:</span>
+                        <span class="tooltip-formula">ln(S/K) = (σ²/2 - r) × T</span>
+                        <span class="tooltip-formula">S = K × exp((σ²/2 - r) × T)</span>
+                    </div>
+                    {% if item.analysis.calc_details %}
+                    <div class="tooltip-section">
+                        <span class="tooltip-label">Values used:</span>
+                        <div style="margin-top: 4px;">
+                            <span class="tooltip-label">K =</span> <span class="tooltip-value">${{ "{:.2f}".format(item.analysis.strike) }}</span>,
+                            <span class="tooltip-label">σ =</span> <span class="tooltip-value">{{ item.analysis.calc_details.iv_percent }}%</span>,
+                            <span class="tooltip-label">r =</span> <span class="tooltip-value">{{ "{:.1f}".format(item.analysis.calc_details.risk_free_rate * 100) }}%</span>,
+                            <span class="tooltip-label">T =</span> <span class="tooltip-value">{{ item.analysis.calc_details.T_years }} yr</span>
+                        </div>
+                        <div style="margin-top: 4px;">
+                            <span class="tooltip-label">Drift term:</span>
+                            <span class="tooltip-formula">(σ²/2 - r)T = {{ item.analysis.calc_details.drift_term }}</span>
+                        </div>
+                        <div style="margin-top: 4px;">
+                            <span class="tooltip-label">Result:</span>
+                            <span class="tooltip-formula">S = {{ "{:.2f}".format(item.analysis.strike) }} × exp({{ item.analysis.calc_details.drift_term }}) = <span class="tooltip-value">${{ "{:.2f}".format(item.analysis.price_at_50pct_assignment) }}</span></span>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% if item.analysis.implied_volatility and item.analysis.implied_volatility > 0.5 and item.analysis.price_at_50pct_assignment > item.analysis.strike %}
+                    <div class="tooltip-section" style="background-color: #3b2020; padding: 6px; border-radius: 4px; margin-top: 8px;">
+                        <strong style="color: #f59e0b;">High IV Effect:</strong>
+                        <div style="margin-top: 4px; color: #ccc;">
+                            With high volatility ({{ "{:.0f}".format(item.analysis.implied_volatility * 100) }}%), the drift term (σ²/2 - r) is positive, 
+                            causing the 50% assignment price to be <em>above</em> the strike for PUTs. This is counterintuitive but mathematically correct.
+                        </div>
+                    </div>
+                    {% endif %}
                 </span>
-            {% endif %}
+            </span>
         </div>
         {% endif %}
     </div>
