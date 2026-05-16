@@ -52,7 +52,12 @@ async def db():
 
 async def _make_full_wheel(db, symbol, put_strike, put_premium,
                             call_strike, call_premium):
-    """Helper: closed wheel cycle, one put assigned, one call called away."""
+    """Helper: closed wheel cycle, one put assigned, one call called away.
+
+    Mirrors what CSV import would produce: each OptionPosition has a
+    corresponding OptionTrade for the opening (amount = premium received),
+    plus the underlying BUY/SELL pair.
+    """
     p_exp = datetime(2025, 1, 17)
     c_exp = datetime(2025, 2, 21)
     put_c = OptionContract(symbol=symbol, expiration=p_exp.date(),
@@ -62,22 +67,35 @@ async def _make_full_wheel(db, symbol, put_strike, put_premium,
     db.add(put_c); db.add(call_c)
     await db.flush()
 
+    put_open = datetime(2025, 1, 2)
+    call_open = datetime(2025, 1, 20)
     put_pos = OptionPosition(
         contract_id=put_c.id, is_closed=True,
-        open_date=datetime(2025, 1, 2), close_date=p_exp,
+        open_date=put_open, close_date=p_exp,
         strategy="SHORT PUT", outcome="ASSIGNED",
         total_premium=Decimal(str(put_premium)), net_pnl=Decimal(str(put_premium)),
         num_contracts=1,
     )
     call_pos = OptionPosition(
         contract_id=call_c.id, is_closed=True,
-        open_date=datetime(2025, 1, 20), close_date=c_exp,
+        open_date=call_open, close_date=c_exp,
         strategy="SHORT CALL", outcome="ASSIGNED",
         total_premium=Decimal(str(call_premium)), net_pnl=Decimal(str(call_premium)),
         num_contracts=1,
     )
     db.add(put_pos); db.add(call_pos)
     await db.flush()
+    # Opening option trades so the per-event timeline sees the premiums.
+    db.add(OptionTrade(
+        contract_id=put_c.id, trade_date=put_open, action="SOLD OPENING",
+        quantity=-1, price=Decimal("1.0"),
+        amount=Decimal(str(put_premium)), raw_symbol=f"-{symbol}",
+    ))
+    db.add(OptionTrade(
+        contract_id=call_c.id, trade_date=call_open, action="SOLD OPENING",
+        quantity=-1, price=Decimal("1.0"),
+        amount=Decimal(str(call_premium)), raw_symbol=f"-{symbol}",
+    ))
     db.add(UnderlyingTrade(
         position_id=put_pos.id, symbol=symbol, trade_date=p_exp,
         action="BUY", quantity=100, price=Decimal(str(put_strike)),
@@ -95,17 +113,23 @@ async def _make_full_wheel(db, symbol, put_strike, put_premium,
 async def _make_active_wheel_holding(db, symbol, put_strike, put_premium):
     """Helper: ONE put assigned, shares still held, no covered call yet."""
     p_exp = datetime(2025, 3, 21)
+    put_open = datetime(2025, 3, 1)
     put_c = OptionContract(symbol=symbol, expiration=p_exp.date(),
                            strike=Decimal(str(put_strike)), option_type="PUT")
     db.add(put_c); await db.flush()
     put_pos = OptionPosition(
         contract_id=put_c.id, is_closed=True,
-        open_date=datetime(2025, 3, 1), close_date=p_exp,
+        open_date=put_open, close_date=p_exp,
         strategy="SHORT PUT", outcome="ASSIGNED",
         total_premium=Decimal(str(put_premium)), net_pnl=Decimal(str(put_premium)),
         num_contracts=1,
     )
     db.add(put_pos); await db.flush()
+    db.add(OptionTrade(
+        contract_id=put_c.id, trade_date=put_open, action="SOLD OPENING",
+        quantity=-1, price=Decimal("1.0"),
+        amount=Decimal(str(put_premium)), raw_symbol=f"-{symbol}",
+    ))
     db.add(UnderlyingTrade(
         position_id=put_pos.id, symbol=symbol, trade_date=p_exp,
         action="BUY", quantity=100, price=Decimal(str(put_strike)),
@@ -225,6 +249,89 @@ async def test_per_symbol_carries_realized_and_unrealized(db):
     assert sym["LIVE"].realized == Decimal("100")
     assert sym["LIVE"].unrealized == Decimal("1000")
     assert sym["LIVE"].pnl == Decimal("1100")
+
+
+@pytest.mark.asyncio
+async def test_active_cycle_timeline_includes_partial_sell_realization(db):
+    """An ACTIVE cycle that has done a partial stock sell should still
+    show that realized gain on the chart timeline at the sell date.
+    Previously these were skipped because the cycle wasn't 'closed' yet
+    and we plotted only at ended_at. Per-trade event sourcing fixes it.
+    """
+    # CSP assigned (BUY 100 @ $50), then half manually sold (SELL 50 @ $60).
+    # Realized stock gain = (60 - 50) * 50 = +$500 at the sell date.
+    p_exp = datetime(2025, 3, 21)
+    put_open = datetime(2025, 3, 1)
+    put_c = OptionContract(symbol="HALF", expiration=p_exp.date(),
+                           strike=Decimal("50"), option_type="PUT")
+    db.add(put_c); await db.flush()
+    put_pos = OptionPosition(
+        contract_id=put_c.id, is_closed=True,
+        open_date=put_open, close_date=p_exp,
+        strategy="SHORT PUT", outcome="ASSIGNED",
+        total_premium=Decimal("100"), net_pnl=Decimal("100"),
+        num_contracts=1,
+    )
+    db.add(put_pos); await db.flush()
+    # Opening option trade — premium realized when the CSP was sold.
+    db.add(OptionTrade(
+        contract_id=put_c.id, trade_date=put_open, action="SOLD OPENING",
+        quantity=-1, price=Decimal("1.0"),
+        amount=Decimal("100"), raw_symbol="-HALF",
+    ))
+    db.add(UnderlyingTrade(
+        position_id=put_pos.id, symbol="HALF", trade_date=p_exp,
+        action="BUY", quantity=100, price=Decimal("50"),
+        amount=Decimal("-5000"), trade_type="ASSIGNMENT",
+    ))
+    # Standalone sell (no covered call → unlinked).
+    sell_date = datetime(2025, 4, 15)
+    db.add(UnderlyingTrade(
+        position_id=None, symbol="HALF", trade_date=sell_date,
+        action="SELL", quantity=50, price=Decimal("60"),
+        amount=Decimal("3000"), trade_type="COVER",
+    ))
+    await db.flush()
+    await detect_wheel_cycles_for_symbol(db, "HALF")
+
+    # Monthly chart must show +$500 in 2025-04 (the SELL month).
+    monthly = await get_monthly_pnl(db, DateRange(None, None, "ALL"))
+    by_month = {m.month: m.pnl for m in monthly}
+    # March: +$100 premium
+    assert by_month["2025-03"] == Decimal("100")
+    # April: +$500 realized stock gain (60-50)*50
+    assert by_month["2025-04"] == Decimal("500")
+
+
+@pytest.mark.asyncio
+async def test_exact_reconciliation_across_all_aggregations(db):
+    """The strongest invariant: dashboard realized == monthly sum ==
+    cumulative final == sum of all per-trade events. Per-event sourcing
+    means there's no aggregation gap anywhere.
+    """
+    await _make_full_wheel(db, "AAA", 95, 200, 100, 150)
+    await _make_full_wheel(db, "BBB", 50, 80, 55, 60)
+    await _make_active_wheel_holding(db, "LIVE", 80, 100)
+    await detect_wheel_cycles_for_symbol(db, "AAA")
+    await detect_wheel_cycles_for_symbol(db, "BBB")
+    await detect_wheel_cycles_for_symbol(db, "LIVE")
+
+    with _mock_prices({"LIVE": 90.0}):
+        stats = await get_overall_stats(db, DateRange(None, None, "ALL"))
+        monthly = await get_monthly_pnl(db, DateRange(None, None, "ALL"))
+        cumul = await get_cumulative_pnl(db, DateRange(None, None, "ALL"))
+
+    monthly_sum = sum((m.pnl for m in monthly), Decimal(0))
+    cumul_final = cumul[-1][1] if cumul else Decimal(0)
+
+    # All three must be byte-equal to realized headline. No "off by
+    # active cycle stock" or "off by open position premium" gaps.
+    assert monthly_sum == stats.realized_pnl, (
+        f"monthly={monthly_sum} realized={stats.realized_pnl}"
+    )
+    assert cumul_final == stats.realized_pnl, (
+        f"cumul={cumul_final} realized={stats.realized_pnl}"
+    )
 
 
 @pytest.mark.asyncio
