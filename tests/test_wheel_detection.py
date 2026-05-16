@@ -221,6 +221,27 @@ async def test_active_cycle_in_progress(db):
 
 
 @pytest.mark.asyncio
+async def test_multiple_events_same_timestamp(db):
+    """Two positions opened the exact same second must not crash the
+    sort. Regression for `@dataclass(order=True)` falling through to
+    compare ORM-mapped fields (TypeError: '<' not supported on
+    OptionPosition). Real-world trigger: bulk imports often have
+    multiple option rows at the same trade_date."""
+    same = datetime(2025, 7, 1, 9, 30, 0)
+    c1 = await _make_contract(db, "SAME", datetime(2025, 7, 18).date(), 100, "PUT")
+    c2 = await _make_contract(db, "SAME", datetime(2025, 7, 18).date(), 105, "PUT")
+    await _make_position(db, c1, strategy="SHORT PUT", premium=50,
+                          opened=same, closed=datetime(2025, 7, 18), outcome="EXPIRED")
+    await _make_position(db, c2, strategy="SHORT PUT", premium=60,
+                          opened=same, closed=datetime(2025, 7, 18), outcome="EXPIRED")
+    # Just verify it doesn't raise. Both expire worthless → one cycle, sum of premiums.
+    n = await detect_wheel_cycles_for_symbol(db, "SAME")
+    assert n == 1
+    c = (await db.execute(select(WheelCycle))).scalar_one()
+    assert c.options_pnl == Decimal("110")
+
+
+@pytest.mark.asyncio
 async def test_idempotent_rebuild(db):
     """Running detection twice should yield the same final state — no
     duplicate cycles, no doubled P&L."""

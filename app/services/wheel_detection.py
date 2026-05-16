@@ -53,13 +53,20 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(order=True)
+@dataclass
 class _Event:
-    """Sortable timeline event used by the state machine."""
+    """Timeline event used by the state machine.
+
+    We sort by an explicit (when, priority) key rather than dataclass-
+    generated `__lt__`, because dataclass(order=True) would compare every
+    field including the ORM-mapped `position` / `underlying` which raise
+    TypeError on `<`.
+
+    Within the same timestamp, lower priority numbers happen first:
+    OPEN (0) → STOCK (1) → CLOSE (2). Keeps a position visible before
+    its assignments fire and prevents premature closure.
+    """
     when: datetime
-    # Lower priority numbers happen first within the same timestamp.
-    # OPEN before STOCK before CLOSE keeps positions visible before
-    # their assignments and stops them being closed prematurely.
     priority: int
     kind: str  # "OPEN" | "STOCK" | "CLOSE"
     position: Optional[OptionPosition] = None
@@ -75,7 +82,7 @@ def _build_timeline(positions: list[OptionPosition]) -> list[_Event]:
             events.append(_Event(ut.trade_date, 1, "STOCK", position=p, underlying=ut))
         if p.is_closed and p.close_date:
             events.append(_Event(p.close_date, 2, "CLOSE", position=p))
-    events.sort()
+    events.sort(key=lambda e: (e.when, e.priority))
     return events
 
 
