@@ -227,6 +227,35 @@ if app_settings.enable_debug_endpoints:
 templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
+
+def _carry_qs(request: Request) -> str:
+    """Return the time-range query-string parts that should follow the
+    user across pages.
+
+    Without this, clicking the nav from /positions?range=1y back to
+    Dashboard drops the range and the user lands on default ALL. The
+    range / start / end keys are the universal axis; everything else
+    (top_n, closed, open, status) is page-specific and intentionally
+    NOT carried — moving from "Positions: open only" to "Cycles" with
+    `open=true` would be nonsense.
+
+    Result includes the leading "?" when non-empty so callers can
+    concatenate it onto a path directly:
+        <a href="/positions{{ carry_qs(request) }}">Positions</a>
+    """
+    from urllib.parse import urlencode
+    keep = {}
+    for k in ("range", "start", "end"):
+        v = request.query_params.get(k)
+        if v:
+            keep[k] = v
+    return ("?" + urlencode(keep)) if keep else ""
+
+
+# Make it globally available in all templates without each route
+# needing to pass it explicitly.
+templates.env.globals["carry_qs"] = _carry_qs
+
 # Static files
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():

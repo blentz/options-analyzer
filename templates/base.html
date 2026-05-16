@@ -274,9 +274,14 @@
     <nav>
         <div class="logo">Options Analyzer</div>
         <div class="nav-links">
-            <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Dashboard</a>
-            <a href="/positions" class="{% if request.url.path == '/positions' %}active{% endif %}">Positions</a>
-            <a href="/cycles" class="{% if request.url.path == '/cycles' %}active{% endif %}">Wheel Cycles</a>
+            {# Time-range params (range/start/end) follow the user across
+               pages that support them. carry_qs() is a template global
+               registered in app/main.py; returns "" when no range is set
+               so links stay clean by default. #}
+            {% set _qs = carry_qs(request) %}
+            <a href="/{{ _qs }}" class="{% if request.url.path == '/' %}active{% endif %}">Dashboard</a>
+            <a href="/positions{{ _qs }}" class="{% if request.url.path == '/positions' %}active{% endif %}">Positions</a>
+            <a href="/cycles{{ _qs }}" class="{% if request.url.path == '/cycles' %}active{% endif %}">Wheel Cycles</a>
             <a href="/risk" class="{% if request.url.path == '/risk' %}active{% endif %}">Risk Analysis</a>
             <a href="/speculation" class="{% if request.url.path == '/speculation' %}active{% endif %}">Speculation</a>
             <a href="/import" class="{% if request.url.path == '/import' %}active{% endif %}">Import</a>

@@ -224,3 +224,55 @@ class TestPositionActiveInRange:
         assert not _position_active_in_range(
             _Pos(datetime(2025, 1, 1), None), dr
         )
+
+
+# ----------------------------------------------------------------------------
+# carry_qs: nav-link query-string preservation across pages that support
+# time ranges. Tested directly without spinning up the whole app — the
+# helper is pure-function over request.query_params.
+# ----------------------------------------------------------------------------
+
+class _FakeRequest:
+    """Stand-in for starlette.requests.Request — only `query_params` is
+    used by carry_qs."""
+    def __init__(self, **params):
+        # Mimic the .get() interface the helper uses; ignore empty values
+        # the same way Starlette's MultiDict would surface them.
+        self.query_params = {k: v for k, v in params.items() if v}
+
+
+class TestCarryQs:
+    @staticmethod
+    def _carry_qs(**params):
+        # Lazy import to avoid coupling test discovery to FastAPI startup.
+        from app.main import _carry_qs
+        return _carry_qs(_FakeRequest(**params))
+
+    def test_range_alone(self):
+        assert self._carry_qs(range="1y") == "?range=1y"
+
+    def test_range_with_custom_dates(self):
+        # urlencode preserves insertion order; range first then start/end.
+        out = self._carry_qs(range="custom", start="2024-01-01", end="2024-12-31")
+        assert out == "?range=custom&start=2024-01-01&end=2024-12-31"
+
+    def test_no_params_means_empty_string(self):
+        # Crucial: must NOT return "?" alone — that produces dangling
+        # query-strings in nav hrefs ("/positions?").
+        assert self._carry_qs() == ""
+
+    def test_page_specific_params_dropped(self):
+        # top_n / closed / open / status are page-specific and would be
+        # nonsense on the other pages. Helper keeps only range/start/end.
+        out = self._carry_qs(range="1y", top_n="10", closed="true", status="active")
+        assert out == "?range=1y"
+
+    def test_empty_values_treated_as_absent(self):
+        # ?range= with no value (user cleared it) shouldn't propagate.
+        assert self._carry_qs(range="", start="", end="") == ""
+
+    def test_url_encoding_special_chars(self):
+        # If a value somehow contains a special character, it gets
+        # percent-encoded so the resulting href is always well-formed.
+        out = self._carry_qs(range="custom", start="2024 01 01")
+        assert "2024+01+01" in out or "2024%2001%2001" in out
