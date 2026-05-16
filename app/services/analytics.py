@@ -548,11 +548,15 @@ async def get_monthly_pnl(
     for p in all_closed_positions:
         if p.close_date:
             mk = p.close_date.strftime('%Y-%m')
-            # net_pnl = options premium only. For non-wheel positions
-            # net_pnl == total_pnl (no linked underlying). For wheel members,
-            # the underlying portion is captured by cycle.stock_pnl below.
-            monthly_data[mk]['pnl'] += p.net_pnl
-            if p.id not in wheel_pids:
+            # Wheel-member positions: only net_pnl on the chart (their
+            # underlying_pnl is captured by cycle.stock_pnl below to avoid
+            # double-counting). Standalone (non-wheel) positions: full
+            # total_pnl, because their underlying_pnl from assignment-linked
+            # stock trades won't appear in any cycle.
+            if p.id in wheel_pids:
+                monthly_data[mk]['pnl'] += p.net_pnl
+            else:
+                monthly_data[mk]['pnl'] += p.total_pnl
                 # Win/loss counts only at the unit level (standalone or
                 # cycle). Wheel-member legs don't separately count.
                 monthly_data[mk]['trades'] += 1
@@ -596,6 +600,7 @@ async def get_cumulative_pnl(
     function's docstring for the rationale on each stream.
     """
     from app.models import WheelCycle as _WC
+    from app.services.wheel_detection import position_ids_in_cycles
 
     dr = date_range or DateRange(None, None, "ALL")
 
@@ -613,10 +618,15 @@ async def get_cumulative_pnl(
         if _in_range(c.ended_at, dr)
     ]
 
+    wheel_pids = await position_ids_in_cycles(db)
     events: list[tuple[datetime, Decimal]] = []
     for p in all_closed_positions:
         if p.close_date:
-            events.append((p.close_date, Decimal(p.net_pnl)))
+            # Same rule as get_monthly_pnl: wheel-member underlying is
+            # captured by cycle.stock_pnl; standalone positions carry
+            # their full total_pnl.
+            contribution = Decimal(p.net_pnl) if p.id in wheel_pids else Decimal(p.total_pnl)
+            events.append((p.close_date, contribution))
     for c in closed_cycles:
         if c.ended_at:
             events.append((c.ended_at, Decimal(c.stock_pnl)))
