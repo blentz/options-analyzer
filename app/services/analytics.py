@@ -367,8 +367,21 @@ async def get_overall_stats(
 
     premium_collected = sum((p.total_premium for p in closed if p.total_premium > 0), Decimal(0))
     premium_paid = sum((p.total_premium for p in closed if p.total_premium < 0), Decimal(0))
-    total_commissions = sum((p.total_commission for p in closed), Decimal(0))
-    total_fees = sum((p.total_fees for p in closed), Decimal(0))
+
+    # Commissions and fees are paid at trade execution, not at position
+    # close. Filter by OptionTrade.trade_date (NOT position.close_date)
+    # and don't exclude wheel members — every trade incurred its
+    # commission regardless of whether its position later ended up in
+    # a wheel cycle. The old code summed only standalone closed
+    # positions' total_commission, which dropped roughly 95% of the
+    # real cost for a heavy wheel trader.
+    trade_stmt = select(OptionTrade)
+    trades_in_range = [
+        t for t in (await db.execute(trade_stmt)).scalars().all()
+        if _in_range(t.trade_date, dr)
+    ]
+    total_commissions = sum((t.commission for t in trades_in_range), Decimal(0))
+    total_fees = sum((t.fees for t in trades_in_range), Decimal(0))
 
     # Mark-to-market on active wheel cycles. Uses live Yahoo prices
     # (cached 60s) so the dashboard reflects today's exposure on shares

@@ -335,6 +335,58 @@ async def test_exact_reconciliation_across_all_aggregations(db):
 
 
 @pytest.mark.asyncio
+async def test_commissions_include_wheel_member_trades(db):
+    """Total commissions must include ALL option trades — wheel-member
+    legs incur commission just like standalone ones. The pre-fix code
+    summed only standalone closed positions' total_commission, dropping
+    ~95% of the real cost for wheel traders.
+    """
+    from app.models import OptionTrade
+
+    # Build a wheel cycle. Helpers create one OptionTrade per leg with
+    # default commission=0; add explicit commissions so the test is
+    # meaningful.
+    await _make_full_wheel(db, "FEE", 95, 200, 100, 150)
+    await detect_wheel_cycles_for_symbol(db, "FEE")
+
+    # Manually update commission on all option trades.
+    trades = (await db.execute(select(OptionTrade))).scalars().all()
+    for t in trades:
+        t.commission = Decimal("0.65")
+        t.fees = Decimal("0.10")
+    await db.flush()
+
+    with _mock_prices({}):
+        stats = await get_overall_stats(db, DateRange(None, None, "ALL"))
+
+    # 2 option trades (CSP opening + CC opening) × $0.65 = $1.30
+    assert stats.total_commissions == Decimal("1.30")
+    # × $0.10 = $0.20
+    assert stats.total_fees == Decimal("0.20")
+
+
+@pytest.mark.asyncio
+async def test_commissions_respect_date_range(db):
+    """Commissions/fees outside the window are excluded. Filter is on
+    OptionTrade.trade_date, not OptionPosition.close_date.
+    """
+    from app.models import OptionTrade
+    await _make_full_wheel(db, "FEE", 95, 200, 100, 150)
+    await detect_wheel_cycles_for_symbol(db, "FEE")
+    trades = (await db.execute(select(OptionTrade))).scalars().all()
+    for t in trades:
+        t.commission = Decimal("0.65")
+    await db.flush()
+
+    # Restrict to a window AFTER both trade_dates → no commissions counted.
+    with _mock_prices({}):
+        stats = await get_overall_stats(db, DateRange(
+            start=datetime(2030, 1, 1), end=datetime(2030, 12, 31), label="Custom"
+        ))
+    assert stats.total_commissions == Decimal("0")
+
+
+@pytest.mark.asyncio
 async def test_compute_active_cycle_unrealized_handles_no_active(db):
     """Empty case — no active cycles → returns zeros, no Yahoo calls."""
     snap = await compute_active_cycle_unrealized(db)
