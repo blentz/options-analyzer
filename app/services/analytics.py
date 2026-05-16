@@ -13,6 +13,92 @@ from sqlalchemy.orm import selectinload
 from app.models import OptionContract, OptionTrade, OptionPosition
 
 
+# Time-range presets exposed on the dashboard. Each maps a short label to a
+# rolling timedelta ending "now". YTD and "all" are handled separately.
+# Keep these short — they're used as both query-string values and button
+# labels on the dashboard.
+_PRESET_RANGES = {
+    "1M": timedelta(days=30),
+    "3M": timedelta(days=90),
+    "6M": timedelta(days=180),
+    "1Y": timedelta(days=365),
+    "2Y": timedelta(days=730),
+    "5Y": timedelta(days=1825),
+}
+
+# Canonical ordering for UI button rows — single source of truth.
+PRESET_RANGE_LABELS: list[str] = ["1M", "3M", "6M", "YTD", "1Y", "2Y", "5Y", "ALL"]
+
+
+@dataclass
+class DateRange:
+    """Resolved analysis window. `start` and `end` are inclusive bounds on
+    OptionPosition.close_date. Either may be None to mean unbounded.
+
+    `label` is the human-readable preset name ("1M", "YTD", "ALL", "Custom")
+    that produced this range — used by the template to highlight the active
+    button and render the date span next to the title.
+    """
+    start: Optional[datetime]
+    end: Optional[datetime]
+    label: str
+
+    @property
+    def is_unbounded(self) -> bool:
+        return self.start is None and self.end is None
+
+
+def resolve_date_range(
+    range_name: Optional[str],
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+) -> DateRange:
+    """Convert a dashboard time-range query into a concrete DateRange.
+
+    Resolution order:
+      - "all" (or no inputs at all) → unbounded
+      - "ytd" → (Jan 1 of current year, now)
+      - "custom" → use explicit start/end (either may be None)
+      - "1M"/"3M"/"6M"/"1Y"/"2Y"/"5Y" → (now − window, now)
+      - explicit start/end without a range name → custom range
+      - anything else → unbounded (don't surprise the user)
+
+    `now` is injectable so callers/tests can pin the clock.
+    """
+    now = now or datetime.utcnow()
+    rn = (range_name or "").strip().lower()
+
+    if rn == "all" or (not rn and start is None and end is None):
+        return DateRange(None, None, "ALL")
+
+    if rn == "ytd":
+        return DateRange(datetime(now.year, 1, 1), now, "YTD")
+
+    if rn == "custom" or (not rn and (start or end)):
+        # Show "Custom" if either bound is set; if both are None we still
+        # arrived here via an explicit range=custom — leave both None and
+        # label as Custom so the UI shows the date inputs as active.
+        return DateRange(start, end, "Custom")
+
+    preset_key = rn.upper()
+    if preset_key in _PRESET_RANGES:
+        return DateRange(now - _PRESET_RANGES[preset_key], now, preset_key)
+
+    return DateRange(None, None, "ALL")
+
+
+def _in_range(close_date: Optional[datetime], dr: DateRange) -> bool:
+    """Inclusive on both ends. Positions with no close_date never pass."""
+    if close_date is None:
+        return False
+    if dr.start is not None and close_date < dr.start:
+        return False
+    if dr.end is not None and close_date > dr.end:
+        return False
+    return True
+
+
 @dataclass
 class OverallStats:
     """Overall trading statistics."""
@@ -77,13 +163,24 @@ class PositionDetail:
     is_closed: bool
 
 
-async def get_overall_stats(db: AsyncSession) -> OverallStats:
-    """Get overall trading statistics."""
+async def get_overall_stats(
+    db: AsyncSession,
+    date_range: Optional[DateRange] = None,
+) -> OverallStats:
+    """Get overall trading statistics.
+
+    When `date_range` is provided, ONLY closed positions are filtered (by
+    close_date). The "open positions" count always reflects what's actually
+    open right now — filtering open positions by a historical close_date is
+    nonsensical, and users expect the open-positions card to show today's
+    state regardless of the time-range selector.
+    """
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract))
     result = await db.execute(stmt)
     positions = list(result.scalars().all())
 
-    closed = [p for p in positions if p.is_closed]
+    closed = [p for p in positions if p.is_closed and _in_range(p.close_date, dr)]
     open_positions = [p for p in positions if not p.is_closed]
     # Use total_pnl for win/loss determination (includes underlying).
     # Breakeven positions ($0 P&L) are neither wins nor losses, so they are
@@ -137,19 +234,23 @@ async def get_overall_stats(db: AsyncSession) -> OverallStats:
     )
 
 
-async def get_pnl_by_symbol(db: AsyncSession) -> list[SymbolStats]:
-    """Get P&L breakdown by underlying symbol."""
+async def get_pnl_by_symbol(
+    db: AsyncSession,
+    date_range: Optional[DateRange] = None,
+) -> list[SymbolStats]:
+    """Get P&L breakdown by underlying symbol within the chosen window."""
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract)).where(
         OptionPosition.is_closed == True
     )
     result = await db.execute(stmt)
-    positions = list(result.scalars().all())
+    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
 
     symbol_data: dict[str, dict] = defaultdict(lambda: {'pnl': Decimal(0), 'count': 0, 'winners': 0})
 
     for p in positions:
         symbol = p.contract.symbol
-        symbol_data[symbol]['pnl'] += p.total_pnl  # Use total_pnl (includes underlying)
+        symbol_data[symbol]['pnl'] += p.total_pnl  # Use total_pnl (includes underlying); range already filtered above
         symbol_data[symbol]['count'] += 1
         if p.total_pnl > 0:
             symbol_data[symbol]['winners'] += 1
@@ -167,13 +268,17 @@ async def get_pnl_by_symbol(db: AsyncSession) -> list[SymbolStats]:
     return stats
 
 
-async def get_monthly_pnl(db: AsyncSession) -> list[MonthlyStats]:
-    """Get P&L breakdown by month."""
+async def get_monthly_pnl(
+    db: AsyncSession,
+    date_range: Optional[DateRange] = None,
+) -> list[MonthlyStats]:
+    """Get P&L breakdown by month within the chosen window."""
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract)).where(
         OptionPosition.is_closed == True
     ).order_by(OptionPosition.close_date)
     result = await db.execute(stmt)
-    positions = list(result.scalars().all())
+    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
 
     # Explicit annotation so mypy can't think the dict values are `object`.
     monthly_data: dict[str, dict] = defaultdict(
@@ -203,13 +308,22 @@ async def get_monthly_pnl(db: AsyncSession) -> list[MonthlyStats]:
     return stats
 
 
-async def get_cumulative_pnl(db: AsyncSession) -> list[tuple[datetime, Decimal]]:
-    """Get cumulative P&L over time for charting."""
+async def get_cumulative_pnl(
+    db: AsyncSession,
+    date_range: Optional[DateRange] = None,
+) -> list[tuple[datetime, Decimal]]:
+    """Get cumulative P&L over time for charting.
+
+    Cumulative resets to zero at the first closed position INSIDE the window —
+    we're answering "how did this window perform on its own", not "what's
+    your all-time running total truncated to a recent slice."
+    """
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).where(
         OptionPosition.is_closed == True
     ).order_by(OptionPosition.close_date)
     result = await db.execute(stmt)
-    positions = list(result.scalars().all())
+    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
 
     cumulative = []
     running_total = Decimal(0)
@@ -222,8 +336,45 @@ async def get_cumulative_pnl(db: AsyncSession) -> list[tuple[datetime, Decimal]]
     return cumulative
 
 
-async def get_positions(db: AsyncSession, closed_only: bool = False, open_only: bool = False) -> list[PositionDetail]:
-    """Get all positions with details."""
+def _position_active_in_range(p: OptionPosition, dr: "DateRange") -> bool:
+    """True if `p` was active at any point within `dr` (overlap semantics).
+
+    For the positions page the most useful question isn't "closed in window"
+    but "was this trade on the books at any time during the window." A short
+    put I opened in March 2024 and closed in October 2024 should show up
+    when I ask for "Q2 2024" — even though neither its open nor close date
+    is inside that quarter. So we use interval overlap:
+
+        opened-before-end  AND  (closed-after-start OR still-open)
+
+    Open positions (close_date None) are considered ongoing through "now".
+    Unbounded ends collapse to trivially-true.
+    """
+    if dr.is_unbounded:
+        return True
+    # opened before end?
+    if dr.end is not None and p.open_date and p.open_date > dr.end:
+        return False
+    # closed after start? (or still open)
+    if dr.start is not None and p.close_date is not None and p.close_date < dr.start:
+        return False
+    return True
+
+
+async def get_positions(
+    db: AsyncSession,
+    closed_only: bool = False,
+    open_only: bool = False,
+    date_range: Optional[DateRange] = None,
+) -> list[PositionDetail]:
+    """Get all positions with details.
+
+    `date_range` uses OVERLAP semantics (see _position_active_in_range): a
+    position is included if it was active for any portion of the window.
+    Different from the dashboard's close-date filter — on the positions
+    page you usually want "what did I have on at any point in this period."
+    """
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract))
 
     if closed_only:
@@ -233,7 +384,7 @@ async def get_positions(db: AsyncSession, closed_only: bool = False, open_only: 
 
     stmt = stmt.order_by(OptionPosition.open_date.desc())
     result = await db.execute(stmt)
-    positions = list(result.scalars().all())
+    positions = [p for p in result.scalars().all() if _position_active_in_range(p, dr)]
 
     details = []
     for p in positions:
@@ -257,11 +408,15 @@ async def get_positions(db: AsyncSession, closed_only: bool = False, open_only: 
     return details
 
 
-async def get_strategy_breakdown(db: AsyncSession) -> dict[str, dict]:
-    """Get performance breakdown by strategy."""
+async def get_strategy_breakdown(
+    db: AsyncSession,
+    date_range: Optional[DateRange] = None,
+) -> dict[str, dict]:
+    """Get performance breakdown by strategy within the chosen window."""
+    dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).where(OptionPosition.is_closed == True)
     result = await db.execute(stmt)
-    positions = list(result.scalars().all())
+    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
 
     strategies: dict[str, dict] = defaultdict(lambda: {'count': 0, 'pnl': Decimal(0), 'winners': 0})
 

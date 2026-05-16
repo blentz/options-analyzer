@@ -105,7 +105,16 @@ class ContractQuote:
 
 @dataclass
 class OptionsChain:
-    """Full options chain for a symbol."""
+    """Full options chain for a symbol.
+
+    The StockNear /stocks/<sym>/options page already contains everything
+    we need — IV/rank/percentile, max pain, put-call ratio, total OI,
+    expirations, and per-expiration max-pain. The dashboard used to scrape
+    the SAME page twice (once via get_options_overview, once via
+    get_options_chain) and then make a third trip to /options/max-pain.
+    Putting all those fields on this single dataclass lets the symbol-
+    lookup endpoint collapse three Playwright navigations into one.
+    """
     symbol: str
     current_price: Optional[float] = None
     expirations: list[str] = field(default_factory=list)  # Available expiration dates
@@ -113,6 +122,12 @@ class OptionsChain:
     iv_rank: Optional[float] = None
     iv_percentile: Optional[float] = None
     implied_volatility: Optional[float] = None
+    # Additional symbol-level fields parsed from the same overview page,
+    # so consumers don't need to re-scrape /options/max-pain etc.
+    put_call_ratio: Optional[float] = None
+    total_volume: Optional[int] = None
+    total_open_interest: Optional[int] = None
+    max_pain: Optional[float] = None  # nearest-expiry max pain ($)
     raw_content: str = ""
     
     def get_strikes_for_expiration(self, expiration: str) -> list[float]:

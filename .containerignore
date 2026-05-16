@@ -1,0 +1,41 @@
+# Anything here is excluded from `podman build` / `docker build` context.
+# Mirror .gitignore for the obvious local-only stuff, plus a few items that
+# the host has but shouldn't end up baked into the image.
+
+# Python bytecode + venvs (huge, also stale once we install fresh in-container)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Local DB and CSVs — these belong on the data volume, never in the image
+data/
+*.db
+**/*.csv
+
+# Tests + dev tooling not needed at runtime
+tests/
+pytest.ini
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Container artifacts
+*.tar
+
+# Local-only env files (the runtime gets env from podman-compose / -e flags)
+.env
+setenv.sh

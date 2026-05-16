@@ -34,10 +34,33 @@
 {% block content %}
 <h1>Options Positions</h1>
 
+{# Time-range selector. We pass the current closed/open status as
+   `extra_query` so clicking a preset preserves the user's tab choice,
+   and as `extra_hidden` so the Custom form's submit does too. #}
+{% set range_target = "/positions" %}
+{% if show_closed_only %}
+    {% set extra_query = "&closed=true" %}
+    {% set extra_hidden = {'closed': 'true'} %}
+{% elif show_open_only %}
+    {% set extra_query = "&open=true" %}
+    {% set extra_hidden = {'open': 'true'} %}
+{% else %}
+    {% set extra_query = "" %}
+    {% set extra_hidden = {} %}
+{% endif %}
+{% include "_time_range_bar.html" with context %}
+
+{# Status filter — preserve the active time range so flipping tabs
+   doesn't reset the user's window. #}
+{% set _range_q = ('&range=' ~ date_range.label|lower) if not date_range.is_unbounded else '' %}
+{% set _date_q = ('&start=' ~ custom_start ~ '&end=' ~ custom_end) if date_range.label == 'Custom' else '' %}
 <div class="filter-bar">
-    <a href="/positions" class="btn {% if not show_closed_only and not show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">All Positions</a>
-    <a href="/positions?open=true" class="btn {% if show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">Open Only</a>
-    <a href="/positions?closed=true" class="btn {% if show_closed_only %}btn-primary{% else %}btn-secondary{% endif %}">Closed Only</a>
+    <a href="/positions?range={{ date_range.label|lower }}{{ _date_q }}"
+       class="btn {% if not show_closed_only and not show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">All Positions</a>
+    <a href="/positions?open=true{{ _range_q }}{{ _date_q }}"
+       class="btn {% if show_open_only %}btn-primary{% else %}btn-secondary{% endif %}">Open Only</a>
+    <a href="/positions?closed=true{{ _range_q }}{{ _date_q }}"
+       class="btn {% if show_closed_only %}btn-primary{% else %}btn-secondary{% endif %}">Closed Only</a>
 </div>
 
 {% if positions %}

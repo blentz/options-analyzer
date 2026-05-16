@@ -64,7 +64,9 @@ from app.services.analytics import (
     get_monthly_pnl,
     get_cumulative_pnl,
     get_positions,
-    get_strategy_breakdown
+    get_strategy_breakdown,
+    resolve_date_range,
+    PRESET_RANGE_LABELS,
 )
 from app.charts import (
     create_cumulative_pnl_chart,
@@ -89,7 +91,10 @@ from pydantic import BaseModel
 async def lifespan(app: FastAPI):
     """Initialize database on startup; release persistent browser on shutdown."""
     import asyncio as _asyncio
-    from app.services.stocknear_service import shutdown_persistent_scraper, cleanup_expired_cache
+    from app.services.stocknear_service import (
+        shutdown_persistent_scraper, cleanup_expired_cache,
+        _get_or_start_persistent_scraper,
+    )
     from app.database import async_session
 
     await init_db()
@@ -106,17 +111,33 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).exception("Cache janitor iteration failed")
             await _asyncio.sleep(3600)
 
+    # Pre-warm the Playwright browser in the background. The first scraper
+    # call otherwise pays a 5-10s Firefox-launch + cookies-injection cost
+    # synchronously inside the user's first /speculation lookup. By spinning
+    # it up at startup we let uvicorn finish booting (so /health works
+    # immediately) and the browser is hot by the time anyone hits a scraping
+    # endpoint. Failure to pre-warm is non-fatal — actual usage will retry.
+    async def _prewarm_scraper():
+        try:
+            await _asyncio.to_thread(_get_or_start_persistent_scraper)
+            logging.getLogger(__name__).info("Persistent Playwright scraper pre-warmed")
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Pre-warm failed — first scraper call will pay the launch cost"
+            )
+
     janitor_task = _asyncio.create_task(_cache_janitor())
+    prewarm_task = _asyncio.create_task(_prewarm_scraper())
 
     try:
         yield
     finally:
-        janitor_task.cancel()
-        try:
-            await janitor_task
-        except _asyncio.CancelledError:
-            pass
-        # Best-effort: drop the persistent Firefox so the container can exit.
+        for t in (janitor_task, prewarm_task):
+            t.cancel()
+            try:
+                await t
+            except _asyncio.CancelledError:
+                pass
         try:
             await _asyncio.to_thread(shutdown_persistent_scraper)
         except Exception:
@@ -212,6 +233,77 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
+@app.post("/api/import/diagnose")
+async def import_diagnose(file: UploadFile = File(...)):
+    """Upload a single CSV and get back what the parser sees, without
+    actually importing anything. Use this to figure out why a file is
+    silently producing zero trades.
+
+    Returns: bytes, line count, header detection result, column names,
+    first 3 raw rows, first 3 parsed rows, action-keyword tallies.
+    """
+    from app.services.csv_import import parse_csv_content
+    import csv as _csv
+    from io import StringIO as _SIO
+
+    content_bytes = await file.read()
+    try:
+        text = content_bytes.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        text = content_bytes.decode('latin-1', errors='replace')
+    lines = text.splitlines()
+
+    # Mirror parser's header detection so we can report what it found.
+    def _first_cell(line: str) -> str:
+        s = line.lstrip("﻿").strip()
+        if not s:
+            return ""
+        return s.split(",", 1)[0].strip().strip('"').strip("'").strip()
+
+    header_idx = None
+    for i, line in enumerate(lines):
+        if _first_cell(line).lower() == "run date":
+            header_idx = i
+            break
+
+    columns: list[str] = []
+    first_rows: list[dict] = []
+    action_tally: dict[str, int] = {}
+    if header_idx is not None:
+        csv_lines = list(lines[header_idx:])
+        csv_lines[0] = csv_lines[0].lstrip()
+        reader = _csv.DictReader(_SIO('\n'.join(csv_lines)))
+        columns = list(reader.fieldnames or [])
+        for n, row in enumerate(reader):
+            if n < 3:
+                first_rows.append({k: (v or '')[:60] for k, v in row.items()})
+            action = (row.get('Action') or '').strip()
+            if action:
+                # Bucket by first keyword to make the tally readable
+                kw = action.split()[0] if action else '(blank)'
+                action_tally[kw] = action_tally.get(kw, 0) + 1
+
+    parsed_trades, parsed_underlying = parse_csv_content(text)
+
+    return {
+        "filename": file.filename,
+        "bytes": len(content_bytes),
+        "lines": len(lines),
+        "first_5_raw_lines": [l[:200] for l in lines[:5]],
+        "header_detected_at_line": header_idx,
+        "columns": columns,
+        "first_3_parsed_rows": first_rows,
+        "action_first_word_tally": action_tally,
+        "parsed_options_trades": len(parsed_trades),
+        "parsed_underlying_trades": len(parsed_underlying),
+        "first_options_trade": (
+            {"date": str(parsed_trades[0].trade_date), "action": parsed_trades[0].action,
+             "symbol": parsed_trades[0].raw_symbol, "amount": str(parsed_trades[0].amount)}
+            if parsed_trades else None
+        ),
+    }
+
+
 @app.get("/health")
 async def health():
     """Liveness probe — process is up and accepting requests."""
@@ -231,18 +323,52 @@ async def ready(db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
-    """Main dashboard with charts and statistics."""
-    stats = await get_overall_stats(db)
-    symbol_stats = await get_pnl_by_symbol(db)
-    monthly_stats = await get_monthly_pnl(db)
-    cumulative_data = await get_cumulative_pnl(db)
-    strategy_data = await get_strategy_breakdown(db)
+async def dashboard(
+    request: Request,
+    top_n: Optional[int] = 25,
+    range: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Main dashboard with charts and statistics.
+
+    Query params:
+      range  Time window preset: 1M, 3M, 6M, YTD, 1Y, 2Y, 5Y, ALL, or
+             "custom" (paired with start/end). Default ALL.
+      start  Custom start date "YYYY-MM-DD" (used when range=custom).
+      end    Custom end date "YYYY-MM-DD"   (used when range=custom).
+      top_n  Max symbols on the P&L-by-symbol chart, ranked by |P&L|.
+             Pass `top_n=0` to show every symbol. Default 25.
+
+    Only closed positions are filtered by the time window — the open-
+    positions count card always shows what's actually open right now.
+    """
+    # Parse optional custom start/end dates. Bad input falls through as None
+    # rather than 400ing — analytics handles None bounds as "unbounded that side".
+    from datetime import datetime as _dt
+    def _parse_iso_date(s: Optional[str]) -> Optional[_dt]:
+        if not s:
+            return None
+        try:
+            return _dt.fromisoformat(s)
+        except ValueError:
+            return None
+
+    date_range = resolve_date_range(range, _parse_iso_date(start), _parse_iso_date(end))
+
+    stats = await get_overall_stats(db, date_range=date_range)
+    symbol_stats = await get_pnl_by_symbol(db, date_range=date_range)
+    monthly_stats = await get_monthly_pnl(db, date_range=date_range)
+    cumulative_data = await get_cumulative_pnl(db, date_range=date_range)
+    strategy_data = await get_strategy_breakdown(db, date_range=date_range)
+
+    effective_top_n: Optional[int] = top_n if top_n and top_n > 0 else None
 
     # Generate charts
     cumulative_script, cumulative_div = create_cumulative_pnl_chart(cumulative_data)
     monthly_script, monthly_div = create_monthly_pnl_chart(monthly_stats)
-    symbol_script, symbol_div = create_symbol_pnl_chart(symbol_stats)
+    symbol_script, symbol_div = create_symbol_pnl_chart(symbol_stats, top_n=effective_top_n)
     winloss_script, winloss_div = create_win_loss_chart(stats.winners, stats.losers)
     strategy_script, strategy_div = create_strategy_chart(strategy_data)
 
@@ -259,6 +385,11 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         "winloss_div": winloss_div,
         "strategy_script": strategy_script,
         "strategy_div": strategy_div,
+        "date_range": date_range,
+        "preset_labels": PRESET_RANGE_LABELS,
+        "top_n": top_n,
+        "custom_start": start or "",
+        "custom_end": end or "",
     })
 
 
@@ -267,16 +398,41 @@ async def positions_page(
     request: Request,
     closed: bool = False,
     open: bool = False,
-    db: AsyncSession = Depends(get_db)
+    range: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
 ):
-    """View all positions."""
-    positions = await get_positions(db, closed_only=closed, open_only=open)
+    """View all positions, optionally filtered by status and time window.
+
+    Time-range filter uses overlap semantics — a position is included if
+    it was active at any point during the window. See
+    `_position_active_in_range` in analytics.py for the exact rule.
+    """
+    from datetime import datetime as _dt
+
+    def _parse_iso_date(s: Optional[str]) -> Optional[_dt]:
+        if not s:
+            return None
+        try:
+            return _dt.fromisoformat(s)
+        except ValueError:
+            return None
+
+    date_range = resolve_date_range(range, _parse_iso_date(start), _parse_iso_date(end))
+    positions = await get_positions(
+        db, closed_only=closed, open_only=open, date_range=date_range,
+    )
 
     return templates.TemplateResponse("positions.html", {
         "request": request,
         "positions": positions,
         "show_closed_only": closed,
-        "show_open_only": open
+        "show_open_only": open,
+        "date_range": date_range,
+        "preset_labels": PRESET_RANGE_LABELS,
+        "custom_start": start or "",
+        "custom_end": end or "",
     })
 
 

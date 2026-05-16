@@ -34,7 +34,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 # Create non-root runtime user. Playwright + Firefox happily run unprivileged
 # and there is no reason to expose the host root namespace to a scraper.
-RUN useradd --create-home --uid 1000 --shell /bin/bash app
+# Also chown /app to the new user: WORKDIR created it as root, and `COPY
+# --chown` below only chowns the copied files (not the directory itself),
+# so without this `uv sync` would fail trying to mkdir /app/.venv.
+RUN useradd --create-home --uid 1000 --shell /bin/bash app \
+    && chown app:app /app
 
 # Sync dependencies (production-only — no dev extras) into a venv at /app/.venv
 # owned by the app user.
@@ -52,7 +56,14 @@ RUN playwright install firefox
 USER root
 COPY --chown=app:app app/ ./app/
 COPY --chown=app:app templates/ ./templates/
-RUN mkdir -p /app/data /app/static /app/browser-profile \
+COPY --chown=app:app static/ ./static/
+# Alembic configuration + migration scripts. init_db() calls
+# `alembic upgrade head` on startup so these MUST be present in the image,
+# or the lifespan crashes with "No 'script_location' key found in
+# configuration." Don't rely on the data volume mount for these.
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app migrations/ ./migrations/
+RUN mkdir -p /app/data /app/browser-profile \
     && chown -R app:app /app
 
 USER app

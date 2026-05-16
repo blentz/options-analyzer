@@ -385,6 +385,34 @@ class StockNearScraper:
         logger.debug("Chain IV data: iv=%s, rank=%s, pct=%s",
                      chain.implied_volatility, chain.iv_rank, chain.iv_percentile)
 
+        # Symbol-level overview fields parsed from the SAME page. These used
+        # to require a separate /options-overview navigation; collapsing here
+        # cuts the symbol-lookup path from 3 Playwright scrapes to 1.
+        pcr_match = re.search(r'Put[/-]Call\s*Ratio\s*[\n\r]+\s*(\d+\.?\d*)', content, re.IGNORECASE)
+        if not pcr_match:
+            pcr_match = re.search(r'Put[/\s-]*Call\s*Ratio[:\s\t]+(\d+\.?\d*)', content, re.IGNORECASE)
+        if pcr_match:
+            try:
+                chain.put_call_ratio = float(pcr_match.group(1))
+            except ValueError:
+                pass
+
+        vol_match = re.search(r"Today'?s\s*Volume\s*[\n\r]+\s*([\d,]+)", content, re.IGNORECASE)
+        if not vol_match:
+            vol_match = re.search(r'Total\s*(?:Options\s*)?Volume[:\s\t\n\r]+([\d,]+[KMB]?)', content, re.IGNORECASE)
+        if vol_match:
+            n = self._parse_number(vol_match.group(1))
+            if n is not None:
+                chain.total_volume = int(n)
+
+        oi_match = re.search(r"Today'?s\s*Open\s*Interest\s*[\n\r]+\s*([\d,]+)", content, re.IGNORECASE)
+        if not oi_match:
+            oi_match = re.search(r'(?:Total\s*)?Open\s*Interest[:\s\t\n\r]+([\d,]+[KMB]?)', content, re.IGNORECASE)
+        if oi_match:
+            n = self._parse_number(oi_match.group(1))
+            if n is not None:
+                chain.total_open_interest = int(n)
+
         # Do NOT scrape the underlying price from this page. The options page
         # contains many dollar amounts (max pain, strikes, market cap, etc.) and
         # the first $ match is unreliable — historically caused silent price
@@ -439,6 +467,14 @@ class StockNearScraper:
                     expirations.append(m)
         
         chain.expirations = expirations[:25]  # Keep up to 25 expirations
+        # Surface the nearest-expiry max-pain as a representative symbol-level
+        # value. The full per-expiration map (with everything) stays internal
+        # for now — the dashboard only ever consumed the single number, so a
+        # full per-expiry API would be premature.
+        if chain.expirations and expiration_data:
+            first = expiration_data.get(chain.expirations[0])
+            if first and first.get('max_pain') is not None:
+                chain.max_pain = first['max_pain']
         logger.info("Found %d expirations for %s", len(chain.expirations), symbol)
         
         # We don't have individual contract bid/ask data from the overview page,

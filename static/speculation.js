@@ -170,10 +170,29 @@
             const input = document.getElementById('symbol-input');
             const symbol = input.value.trim().toUpperCase();
             if (!symbol) { showError('lookup-result', 'Please enter a symbol'); return; }
-            showLoading('lookup-result', `Looking up ${symbol}...`);
+
+            // Live elapsed-time progress. The scrape can take 10-30s on a
+            // cold symbol; without a ticking counter users assume the page
+            // is broken and reload (which makes things worse).
+            const started = Date.now();
+            const el = document.getElementById('lookup-result');
+            const tick = () => {
+                const elapsed = Math.floor((Date.now() - started) / 1000);
+                let hint = '';
+                if (elapsed > 25) hint = ' — still working, this is the cold-start cost';
+                else if (elapsed > 10) hint = ' — scraping StockNear (10-30s typical)';
+                if (el) {
+                    el.innerHTML = `<span class="loading-indicator">Looking up ${symbol}... ${elapsed}s${hint}</span>`;
+                    el.style.display = 'block';
+                }
+            };
+            tick();
+            const timer = setInterval(tick, 1000);
+
             try {
                 const res = await fetch(`/api/speculation/lookup?symbol=${symbol}`);
                 const data = await res.json();
+                clearInterval(timer);
                 if (data.detail) { showError('lookup-result', `Error: ${data.detail}`); return; }
                 if (!data.current_price) { showError('lookup-result', `Could not get price for ${symbol}`); return; }
 
@@ -200,7 +219,10 @@
                 document.getElementById('legs-container').innerHTML = '';
                 state.legCounter = 0;
                 this.addLeg();
-            } catch (e) { showError('lookup-result', `Error: ${e.message}`); }
+            } catch (e) {
+                clearInterval(timer);
+                showError('lookup-result', `Error: ${e.message}`);
+            }
         },
 
         addLeg(config = {}) {

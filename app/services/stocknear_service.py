@@ -457,6 +457,31 @@ async def get_live_iv_for_symbols(
     return results
 
 
+def _chain_from_dict(d: dict) -> OptionsChain:
+    """Build an OptionsChain from a cached/serialised dict.
+
+    Single source of truth so we don't need to remember to update three
+    near-identical constructor calls whenever a field is added to the
+    dataclass — which is exactly how put_call_ratio, max_pain, total_volume
+    and total_open_interest got silently dropped on the cache round-trip
+    before this helper existed.
+    """
+    contracts = [OptionContract(**c) for c in d.get("contracts", [])]
+    return OptionsChain(
+        symbol=d["symbol"],
+        current_price=d.get("current_price"),
+        expirations=d.get("expirations", []),
+        contracts=contracts,
+        iv_rank=d.get("iv_rank"),
+        iv_percentile=d.get("iv_percentile"),
+        implied_volatility=d.get("implied_volatility"),
+        put_call_ratio=d.get("put_call_ratio"),
+        total_volume=d.get("total_volume"),
+        total_open_interest=d.get("total_open_interest"),
+        max_pain=d.get("max_pain"),
+    )
+
+
 def _fetch_options_chain_sync(symbol: str) -> dict:
     """Synchronous fetch of options chain - runs in thread pool."""
     scraper = _get_or_start_persistent_scraper()
@@ -468,6 +493,12 @@ def _fetch_options_chain_sync(symbol: str) -> dict:
         "iv_rank": chain.iv_rank,
         "iv_percentile": chain.iv_percentile,
         "implied_volatility": chain.implied_volatility,
+        # Symbol-level overview fields, scraped from the same page as the
+        # IV data so we can drop the redundant /options-overview call.
+        "put_call_ratio": chain.put_call_ratio,
+        "total_volume": chain.total_volume,
+        "total_open_interest": chain.total_open_interest,
+        "max_pain": chain.max_pain,
         "contracts": [
             {
                 "strike": c.strike,
@@ -521,18 +552,7 @@ async def get_options_chain(
                 "Returning valid cached options chain for %s (%d contracts)",
                 symbol, len(valid_cache.get("contracts", []))
             )
-            contracts = [
-                OptionContract(**c) for c in valid_cache.get("contracts", [])
-            ]
-            return OptionsChain(
-                symbol=valid_cache["symbol"],
-                current_price=valid_cache.get("current_price"),
-                expirations=valid_cache.get("expirations", []),
-                contracts=contracts,
-                iv_rank=valid_cache.get("iv_rank"),
-                iv_percentile=valid_cache.get("iv_percentile"),
-                implied_volatility=valid_cache.get("implied_volatility"),
-            )
+            return _chain_from_dict(valid_cache)
     
     # Get any cached data (including expired) for merging with fresh data
     cached = await get_cached_data(db, cache_key, include_expired=True)
@@ -569,36 +589,12 @@ async def get_options_chain(
             final_dict = fresh_dict
         
         await set_cached_data(db, cache_key, "options_chain", symbol, final_dict)
-        
-        contracts = [
-            OptionContract(**c) for c in final_dict.get("contracts", [])
-        ]
-        return OptionsChain(
-            symbol=final_dict["symbol"],
-            current_price=final_dict.get("current_price"),
-            expirations=final_dict.get("expirations", []),
-            contracts=contracts,
-            iv_rank=final_dict.get("iv_rank"),
-            iv_percentile=final_dict.get("iv_percentile"),
-            implied_volatility=final_dict.get("implied_volatility"),
-        )
+        return _chain_from_dict(final_dict)
     except Exception as e:
         logger.error("Error fetching options chain for %s: %s", symbol, e)
-        # On error, return cached data if available
         if cached:
             logger.info("Falling back to cached chain for %s", symbol)
-            contracts = [
-                OptionContract(**c) for c in cached.get("contracts", [])
-            ]
-            return OptionsChain(
-                symbol=cached["symbol"],
-                current_price=cached.get("current_price"),
-                expirations=cached.get("expirations", []),
-                contracts=contracts,
-                iv_rank=cached.get("iv_rank"),
-                iv_percentile=cached.get("iv_percentile"),
-                implied_volatility=cached.get("implied_volatility"),
-            )
+            return _chain_from_dict(cached)
         return None
 
 
@@ -641,95 +637,76 @@ async def get_available_expirations(
 async def get_symbol_speculation_data(
     db: AsyncSession,
     symbol: str,
-    force_refresh: bool = False
+    force_refresh: bool = False,
 ) -> dict:
-    """
-    Get all data needed for options speculation on a symbol.
-    
-    Uses fallbacks to ensure data is available even when markets are closed:
-    - Price: Yahoo Finance -> StockNear chain -> StockNear stock overview
-    - IV data: StockNear options overview (cached)
-    
+    """Get all data needed for options speculation on a symbol.
+
+    Sources:
+      - Live underlying price: Yahoo Finance (cheap, fast — ~200ms)
+      - Everything else: ONE Playwright scrape of /stocks/<sym>/options
+        which carries IV/rank/percentile, put-call ratio, total OI,
+        expirations, and nearest-expiry max-pain.
+
+    Previously this function hit Playwright three times — get_options_chain,
+    get_options_overview, and get_max_pain — even though all three pulled
+    from the same StockNear page. On a cold container that meant ~30-60s of
+    serialized browser-driven scraping per first lookup. Collapsing to a
+    single chain fetch cuts that to ~10-20s and the cache pattern then
+    makes subsequent lookups near-instant.
+
     Returns dict with:
-    - current_price: float
-    - implied_volatility: float (as decimal)
-    - iv_rank: float (0-100)
-    - iv_percentile: float (0-100)
-    - expirations: list[str]
-    - max_pain: float
-    - put_call_ratio: float
+      current_price, price_change, price_change_percent (Yahoo),
+      implied_volatility, iv_rank, iv_percentile (chain),
+      put_call_ratio, total_open_interest, max_pain, expirations (chain).
     """
     symbol = symbol.upper()
     logger.info("Getting speculation data for %s (force_refresh=%s)", symbol, force_refresh)
-    
-    # Get enriched quote (price + options data)
+
     from app.services.price_service import get_stock_price
-    
-    # Try Yahoo Finance first for live price
+
     price_quote = await get_stock_price(symbol)
     current_price = price_quote.price if price_quote else None
     price_change = price_quote.change if price_quote else None
     price_change_percent = price_quote.change_percent if price_quote else None
     logger.debug("Yahoo price for %s: %s", symbol, current_price)
-    
-    # Get options chain data (cached) - this has last-known price and option data
+
+    # ONE Playwright scrape — chain now carries every symbol-level field
+    # we used to fetch separately. See OptionsChain dataclass for the list.
     chain = await get_options_chain(db, symbol, force_refresh)
-    
-    # No silent fallback to scraped chain price — if Yahoo returns null the
-    # caller must surface the failure to the user. (Using regex on the options
-    # page text routinely produced bogus prices, e.g. picking up market-cap
-    # dollar amounts as the stock price.)
+
+    # Yahoo is authoritative for price; chain has no reliable price field.
+    # If Yahoo failed, log it — callers HTTP 503 from there.
     if current_price is None:
         logger.warning("No live price for %s — Yahoo returned null", symbol)
-    
-    # Get options overview for IV data
-    options_data = await get_options_overview(db, symbol, force_refresh)
-    
-    # Fallback to chain's IV data if options overview is missing
-    implied_volatility = None
-    iv_rank = None
-    iv_percentile = None
-    
-    if options_data:
-        implied_volatility = options_data.implied_volatility
-        iv_rank = options_data.iv_rank
-        iv_percentile = options_data.iv_percentile
-    
-    if implied_volatility is None and chain:
-        logger.debug("Using chain IV fallback for %s", symbol)
-        implied_volatility = chain.implied_volatility
-    if iv_rank is None and chain:
-        iv_rank = chain.iv_rank
-    if iv_percentile is None and chain:
-        iv_percentile = chain.iv_percentile
-    
-    logger.debug(
-        "Speculation data for %s: price=%s, IV=%s, IV_rank=%s",
-        symbol, current_price, implied_volatility, iv_rank
-    )
-    
-    # Get max pain
-    max_pain = await get_max_pain(db, symbol, force_refresh)
-    
-    # Get available expirations - prefer chain data
-    expirations = []
-    if chain and chain.expirations:
-        expirations = chain.expirations
-    else:
-        expirations = await get_available_expirations(db, symbol, force_refresh)
-    
+
+    if chain is None:
+        # Scraper failed completely — return what we have (price only).
+        return {
+            "symbol": symbol,
+            "current_price": current_price,
+            "price_change": price_change,
+            "price_change_percent": price_change_percent,
+            "implied_volatility": None,
+            "iv_rank": None,
+            "iv_percentile": None,
+            "put_call_ratio": None,
+            "total_open_interest": None,
+            "max_pain": None,
+            "expirations": [],
+        }
+
     return {
         "symbol": symbol,
         "current_price": current_price,
         "price_change": price_change,
         "price_change_percent": price_change_percent,
-        "implied_volatility": implied_volatility,
-        "iv_rank": iv_rank,
-        "iv_percentile": iv_percentile,
-        "put_call_ratio": options_data.put_call_ratio if options_data else None,
-        "total_open_interest": options_data.total_open_interest if options_data else None,
-        "max_pain": max_pain,
-        "expirations": expirations,
+        "implied_volatility": chain.implied_volatility,
+        "iv_rank": chain.iv_rank,
+        "iv_percentile": chain.iv_percentile,
+        "put_call_ratio": chain.put_call_ratio,
+        "total_open_interest": chain.total_open_interest,
+        "max_pain": chain.max_pain,
+        "expirations": chain.expirations,
     }
 
 

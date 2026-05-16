@@ -150,9 +150,24 @@
 
 {% block content %}
 <h1>Options Speculation</h1>
-<p style="color: #888; margin-bottom: 1.5rem;">
-    Analyze hypothetical options strategies before entering positions. Data from StockNear (cached 5 min).
+<p style="color: #888; margin-bottom: 0.5rem;">
+    Analyze hypothetical options strategies before entering positions.
 </p>
+
+{# Set expectations up front: the very first symbol lookup after a
+   container restart drives a headless browser that has to navigate
+   StockNear, wait for the page's JavaScript to render, and parse the
+   result. We pre-warm the browser at startup, but the per-symbol page
+   load itself still takes 10-30s on first hit. Subsequent lookups for
+   the same symbol return from a 1-hour database cache. #}
+<div style="margin-bottom: 1.5rem; padding: 0.75rem 1rem; background-color: #1a2a3a; border-left: 4px solid #3b82f6; border-radius: 4px; color: #ccc; font-size: 0.85rem; line-height: 1.5;">
+    <strong style="color: #3b82f6;">First lookup is slow.</strong>
+    Symbol data is scraped from StockNear via a headless browser —
+    expect <strong>10–30 seconds</strong> on the first call for any new
+    symbol. Subsequent lookups for the same ticker return instantly from
+    the 1-hour cache. Live contract quotes go through a faster JSON API
+    (~500ms each).
+</div>
 
 <!-- Symbol Lookup Section -->
 <div class="stat-card" style="margin-bottom: 1.5rem;">

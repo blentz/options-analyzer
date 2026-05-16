@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from datetime import datetime
+from typing import Optional
 from bokeh.plotting import figure
 from bokeh.models import (
     ColumnDataSource, HoverTool, NumeralTickFormatter, DatetimeTickFormatter,
@@ -59,60 +60,88 @@ def create_cumulative_pnl_chart(data: list[tuple[datetime, Decimal]]) -> tuple[s
 
 
 def create_monthly_pnl_chart(data: list) -> tuple[str, str]:
-    """Create monthly P&L bar chart."""
+    """Create monthly P&L bar chart.
+
+    Uses a datetime x-axis (not a categorical x_range) so the chart scales
+    cleanly when years of data are imported. The previous categorical layout
+    rendered every month as a fixed-width band, which crushed bars together
+    and stacked labels into an unreadable wall once you had ~24+ months.
+    Bokeh's built-in pan/zoom now works against time.
+    """
     if not data:
         return create_empty_chart("Monthly P&L", "No closed positions yet")
 
-    months = [d.month for d in data]
+    # MonthlyStats.month is a "YYYY-MM" string — convert to a midpoint-of-
+    # month datetime for plotting, but keep the label for the hover tooltip.
+    month_labels = [d.month for d in data]
+    month_dates = [datetime.strptime(d.month, "%Y-%m").replace(day=15) for d in data]
     pnls = [float(d.pnl) for d in data]
     colors = ["#22c55e" if v >= 0 else "#ef4444" for v in pnls]
 
     source = ColumnDataSource(data={
-        'month': months,
+        'date': month_dates,
+        'month': month_labels,
         'pnl': pnls,
         'pnl_formatted': [f"${v:,.2f}" for v in pnls],
         'color': colors,
         'trades': [d.num_trades for d in data],
         'winners': [d.winners for d in data],
-        'losers': [d.losers for d in data]
+        'losers': [d.losers for d in data],
     })
 
     p = figure(
-        title="Monthly P&L",
-        x_range=months,
+        title=f"Monthly P&L ({len(data)} months)",
+        x_axis_type='datetime',
         height=350,
         sizing_mode='stretch_width',
-        tools="pan,wheel_zoom,box_zoom,reset,save"
+        tools="pan,wheel_zoom,box_zoom,reset,save",
     )
 
-    p.vbar(x='month', top='pnl', source=source, width=0.7, color='color', alpha=0.8)
+    # Bar width is ~25 days worth of milliseconds so each month renders as
+    # a fat bar without overlapping its neighbour.
+    bar_width_ms = 25 * 24 * 60 * 60 * 1000
+    p.vbar(x='date', top='pnl', source=source, width=bar_width_ms,
+           color='color', alpha=0.8)
 
-    # Zero line
-    p.line([-0.5, len(months) - 0.5], [0, 0], line_dash='dashed', color='gray', alpha=0.5)
+    # Zero line across the full date span.
+    if month_dates:
+        p.line([min(month_dates), max(month_dates)], [0, 0],
+               line_dash='dashed', color='gray', alpha=0.5)
 
     hover = HoverTool(tooltips=[
         ("Month", "@month"),
         ("P&L", "@pnl_formatted"),
         ("Trades", "@trades"),
-        ("W/L", "@winners / @losers")
-    ])
+        ("W/L", "@winners / @losers"),
+    ], formatters={'@date': 'datetime'})
     p.add_tools(hover)
 
     p.yaxis.formatter = NumeralTickFormatter(format="$0,0")
-    p.xaxis.major_label_orientation = 0.7
+    p.xaxis.formatter = DatetimeTickFormatter(months="%b %Y", years="%Y")
 
     _style_chart(p)
     return components(p)
 
 
-def create_symbol_pnl_chart(data: list) -> tuple[str, str]:
-    """Create P&L by symbol horizontal bar chart."""
+def create_symbol_pnl_chart(data: list, top_n: Optional[int] = 25) -> tuple[str, str]:
+    """Create P&L by symbol horizontal bar chart.
+
+    `top_n` controls how many symbols are shown. With years of imported data
+    a hard cap of 10 hid most of the user's history, so the default is now
+    25 selected by |P&L| (biggest winners AND biggest losers, which is what
+    you usually want to see). Pass `top_n=None` to show every symbol.
+    """
     if not data:
         return create_empty_chart("P&L by Symbol", "No closed positions yet")
 
-    # Sort by P&L and take top 10
-    sorted_data = sorted(data, key=lambda x: x.pnl, reverse=True)[:10]
-    sorted_data.reverse()  # Reverse for horizontal bar chart
+    # Sort by absolute P&L so the chart surfaces biggest movers in either
+    # direction (the prior top-10-by-pnl hid all the big losers).
+    sorted_data = sorted(data, key=lambda x: abs(float(x.pnl)), reverse=True)
+    if top_n is not None:
+        sorted_data = sorted_data[:top_n]
+    # Re-sort the displayed slice by signed P&L so the chart reads top→bottom
+    # from biggest winner to biggest loser.
+    sorted_data = sorted(sorted_data, key=lambda x: float(x.pnl))
 
     symbols = [d.symbol for d in sorted_data]
     pnls = [float(d.pnl) for d in sorted_data]
@@ -127,10 +156,17 @@ def create_symbol_pnl_chart(data: list) -> tuple[str, str]:
         'win_rate': [f"{d.win_rate:.1f}%" for d in sorted_data]
     })
 
+    title = (
+        f"P&L by Symbol (Top {top_n} by |P&L|)"
+        if top_n is not None and len(data) > top_n
+        else f"P&L by Symbol ({len(symbols)} symbols)"
+    )
+    # Scale height so each bar gets a readable slot even at top_n=25+.
+    bar_height = 24
     p = figure(
-        title="P&L by Symbol (Top 10)",
+        title=title,
         y_range=symbols,
-        height=350,
+        height=max(350, len(symbols) * bar_height + 80),
         sizing_mode='stretch_width',
         tools="pan,wheel_zoom,box_zoom,reset,save"
     )

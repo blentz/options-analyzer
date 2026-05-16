@@ -49,6 +49,50 @@ class ParsedTrade:
     raw_symbol: str
 
 
+def _parse_qty_and_price(row: dict) -> tuple[int, Decimal]:
+    """Return (quantity, price_per_share) from a Fidelity CSV row.
+
+    Fidelity has shipped at least two column layouts that share the same
+    header line but place numbers in different columns:
+
+      Modern (Q425+):    Quantity=<int>     Currency=<ccy>  Price=<premium>
+      Shifted (older):   Quantity=<ccy>     Currency=<premium>  Price=<int>
+
+    Plus a third quirky case: EXPIRED / ASSIGNED event rows even in NEW
+    exports still come back shifted (Quantity='USD', Currency='', Price=qty,
+    premium=0). The strict `int(float(row['Quantity']))` we used to do
+    silently failed on every shifted row — that's why entire years of older
+    options activity wouldn't import.
+
+    Strategy: try the modern layout first (Quantity numeric). If parsing
+    Quantity as a number raises, fall back to the shifted layout (Quantity
+    = currency code, real qty is in Price, real premium is in Currency).
+    Both layouts use the Amount column for net cash flow, so amount is
+    parsed by the caller from row['Amount'] unchanged.
+    """
+    qty_raw = (row.get('Quantity', '') or '').strip()
+    price_raw = (row.get('Price', '') or '').strip()
+    currency_raw = (row.get('Currency', '') or '').strip()
+
+    # Modern layout: Quantity is a number.
+    try:
+        if qty_raw:
+            quantity = int(float(qty_raw))
+            price = Decimal(price_raw) if price_raw else Decimal(0)
+            return quantity, price
+    except (ValueError, InvalidOperation):
+        pass
+
+    # Shifted (legacy) layout: Quantity holds a currency code; real qty is
+    # in Price; real premium (may be empty for EXPIRED/ASSIGNED) is in Currency.
+    try:
+        quantity = int(float(price_raw)) if price_raw else 0
+        price = Decimal(currency_raw) if currency_raw else Decimal(0)
+        return quantity, price
+    except (ValueError, InvalidOperation):
+        return 0, Decimal(0)
+
+
 @dataclass
 class ParsedUnderlyingTrade:
     """Parsed underlying stock trade from assignment/exercise."""
@@ -91,30 +135,74 @@ def parse_option_symbol(symbol: str, description: str) -> Optional[ParsedContrac
     return None
 
 
-def parse_csv_content(content: str, account_filter: str = "INDIVIDUAL") -> tuple[list[ParsedTrade], list[ParsedUnderlyingTrade]]:
-    """Parse Fidelity CSV export content and extract options trades and underlying stock trades."""
+def parse_csv_content(
+    content: str,
+    account_filter: Optional[str] = None,
+) -> tuple[list[ParsedTrade], list[ParsedUnderlyingTrade]]:
+    """Parse Fidelity CSV export content and extract options and underlying trades.
+
+    Robust header detection: Fidelity has used several CSV header conventions
+    across the years (quoted vs unquoted columns, leading whitespace,
+    case differences). The old `line.startswith('Run Date,')` check rejected
+    every export written before late 2024 — entire quarterly files were
+    silently dropped because the parser couldn't find a header it recognised.
+
+    We now match the first line whose first cell (after stripping quotes and
+    whitespace) equals "Run Date" case-insensitively. csv.DictReader then
+    handles the rest of the row including the quoting.
+
+    `account_filter`: if set, only rows whose Account column EQUALS this
+    string (case-insensitive, whitespace-stripped) are kept. Default is None
+    (no filter) — the previous hardcoded "INDIVIDUAL" excluded valid trades
+    when Fidelity labeled accounts differently across years (e.g.,
+    "Individual - TOD", account numbers, etc).
+    """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
     trades = []
     underlying_trades = []
     lines = content.splitlines()
 
-    # Find header row
+    def _first_cell(line: str) -> str:
+        # Strip BOM (utf-8-sig), leading whitespace, optional outer quotes,
+        # then return everything up to the first comma.
+        s = line.lstrip("﻿").strip()
+        if not s:
+            return ""
+        first = s.split(",", 1)[0]
+        return first.strip().strip('"').strip("'").strip()
+
     header_idx = None
     for i, line in enumerate(lines):
-        if line.startswith('Run Date,'):
+        if _first_cell(line).lower() == "run date":
             header_idx = i
             break
 
     if header_idx is None:
+        # Surface this in logs so the user can spot which file was rejected.
+        snippet = "\n".join(lines[:3]) if lines else "(empty)"
+        _logger.warning(
+            "CSV import: no 'Run Date' header found in any of %d lines. "
+            "File first 3 lines: %r", len(lines), snippet,
+        )
         return [], []
 
-    csv_content = '\n'.join(lines[header_idx:])
+    # Strip leading whitespace from the header line specifically — csv.DictReader
+    # otherwise keeps "   Run Date" as the literal column name, so every later
+    # row[...] lookup KeyErrors.
+    csv_lines = list(lines[header_idx:])
+    csv_lines[0] = csv_lines[0].lstrip()
+    csv_content = '\n'.join(csv_lines)
     reader = csv.DictReader(StringIO(csv_content))
 
     for row in reader:
-        # Only filter by account if the Account column exists in the CSV
-        if 'Account' in row:
-            account = (row.get('Account') or '').strip()
-            if account_filter and account != account_filter:
+        # Only filter by account when the caller requested it AND the column
+        # is actually present. Match case-insensitively after stripping so
+        # "individual", " INDIVIDUAL ", "Individual" all behave the same.
+        if account_filter and 'Account' in row:
+            account = (row.get('Account') or '').strip().lower()
+            if account != account_filter.strip().lower():
                 continue
 
         action = row.get('Action') or ''
@@ -152,9 +240,11 @@ def parse_csv_content(content: str, account_filter: str = "INDIVIDUAL") -> tuple
                 except ValueError:
                     pass
 
-            # Fidelity CSV column mapping
-            quantity = int(float(row.get('Quantity', '0') or '0'))
-            price = Decimal(row.get('Price', '0') or '0')
+            # Fidelity column-shift tolerant. Quantity/Price are extracted
+            # via the helper that handles BOTH the modern layout and the
+            # legacy "Quantity=USD, Price=qty, Currency=premium" layout that
+            # silently broke years of older imports.
+            quantity, price = _parse_qty_and_price(row)
             commission = Decimal(row.get('Commission', '0') or '0')
             fees = Decimal(row.get('Fees', '0') or '0')
             amount_str = (row.get('Amount', '0') or '0').replace(',', '')
@@ -206,12 +296,8 @@ def _parse_underlying_trade(row: dict, action: str, symbol: str, description: st
     try:
         trade_date = datetime.strptime(row['Run Date'], '%m/%d/%Y')
 
-        # Fidelity CSV column mapping
-        quantity_raw = row.get('Quantity', '0') or '0'
-        quantity = int(float(quantity_raw)) if quantity_raw else 0
-
-        price_str = row.get('Price', '0') or '0'
-        price = Decimal(price_str) if price_str else Decimal(0)
+        # Column-shift tolerant (see _parse_qty_and_price docstring).
+        quantity, price = _parse_qty_and_price(row)
 
         amount_str = (row.get('Amount', '0') or '0').replace(',', '')
         amount = Decimal(amount_str)
@@ -522,10 +608,29 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
     """
     Import trades from CSV content.
     Returns (imported_count, skipped_count).
+
+    Raises ValueError with an actionable message when the file looks
+    non-empty but the parser found no usable rows — usually a header
+    mismatch (older Fidelity CSV format) or a CSV from a different
+    broker entirely. The upload UI surfaces this as the per-file error.
     """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
     from sqlalchemy.orm import selectinload
 
     parsed_trades, parsed_underlying = parse_csv_content(content)
+
+    if not parsed_trades and not parsed_underlying:
+        non_empty = bool(content.strip())
+        if non_empty:
+            _logger.warning(
+                "import_csv: %s yielded 0 trades and 0 underlying rows from a "
+                "non-empty file (%d bytes). Likely header-format mismatch.",
+                filename, len(content),
+            )
+            # Don't raise — the user uploaded a batch and we don't want a
+            # single bad file to abort the whole transaction. Record it as
+            # zero-imported; the caller sees imp=0/skip=0 and the log line.
 
     imported = 0
     skipped = 0
