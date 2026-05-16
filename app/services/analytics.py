@@ -169,18 +169,35 @@ async def get_overall_stats(
 ) -> OverallStats:
     """Get overall trading statistics.
 
-    When `date_range` is provided, ONLY closed positions are filtered (by
-    close_date). The "open positions" count always reflects what's actually
-    open right now — filtering open positions by a historical close_date is
-    nonsensical, and users expect the open-positions card to show today's
-    state regardless of the time-range selector.
+    Wheel-aware: each wheel cycle counts as ONE trade for win/loss
+    purposes. Constituent CSPs and CCs don't independently inflate the
+    win/loss counters (which used to make a profitable wheel show up
+    as "one loss + one win" — i.e., a 50% win rate for a strategy
+    that actually printed money). Loose options (long calls/puts you
+    bought outright, etc.) still count individually.
+
+    When `date_range` is provided, ONLY closed positions and CLOSED
+    cycles are filtered (by close_date / ended_at). The "open
+    positions" count always reflects what's actually open right now.
     """
+    from app.models import WheelCycle
+    from app.services.wheel_detection import position_ids_in_cycles
+
     dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract))
     result = await db.execute(stmt)
     positions = list(result.scalars().all())
 
-    closed = [p for p in positions if p.is_closed and _in_range(p.close_date, dr)]
+    # Position IDs that belong to a wheel cycle — exclude from the per-
+    # position W/L tally and re-add at the cycle level below.
+    wheel_position_ids = await position_ids_in_cycles(db)
+
+    closed = [
+        p for p in positions
+        if p.is_closed
+        and _in_range(p.close_date, dr)
+        and p.id not in wheel_position_ids
+    ]
     open_positions = [p for p in positions if not p.is_closed]
     # Use total_pnl for win/loss determination (includes underlying).
     # Breakeven positions ($0 P&L) are neither wins nor losses, so they are
@@ -188,7 +205,25 @@ async def get_overall_stats(
     winners = [p for p in closed if p.total_pnl > 0]
     losers = [p for p in closed if p.total_pnl < 0]
     breakeven = [p for p in closed if p.total_pnl == 0]
-    decisive = len(winners) + len(losers)
+
+    # Fold in CLOSED wheel cycles as single trades. Filter by the date
+    # range using ended_at (analogous to close_date for positions).
+    cycle_stmt = select(WheelCycle).where(WheelCycle.status == "CLOSED")
+    closed_cycles = [
+        c for c in (await db.execute(cycle_stmt)).scalars().all()
+        if _in_range(c.ended_at, dr)
+    ]
+    cycle_winners = sum(1 for c in closed_cycles if c.total_pnl > 0)
+    cycle_losers = sum(1 for c in closed_cycles if c.total_pnl < 0)
+    cycle_breakeven = sum(1 for c in closed_cycles if c.total_pnl == 0)
+    cycle_total_pnl = sum((c.total_pnl for c in closed_cycles), Decimal(0))
+    cycle_options_pnl = sum((c.options_pnl for c in closed_cycles), Decimal(0))
+    cycle_stock_pnl = sum((c.stock_pnl for c in closed_cycles), Decimal(0))
+
+    decisive = (len(winners) + len(losers)) + (cycle_winners + cycle_losers)
+    win_count = len(winners) + cycle_winners
+    loss_count = len(losers) + cycle_losers
+    breakeven_count = len(breakeven) + cycle_breakeven
 
     expired = len([p for p in closed if p.outcome == 'EXPIRED'])
     assigned = len([p for p in closed if p.outcome == 'ASSIGNED'])
@@ -199,10 +234,11 @@ async def get_overall_stats(
     long_puts = len([p for p in positions if p.strategy == 'LONG PUT'])
     long_calls = len([p for p in positions if p.strategy == 'LONG CALL'])
 
-    # Calculate P&L components
-    options_pnl = sum((p.net_pnl for p in closed), Decimal(0))
-    underlying_pnl = sum((p.underlying_pnl for p in closed), Decimal(0))
-    total_pnl = sum((p.total_pnl for p in closed), Decimal(0))
+    # Calculate P&L components. Includes cycle P&L so the dashboard's
+    # Total / Options / Underlying buckets sum to your actual realised gain.
+    options_pnl = sum((p.net_pnl for p in closed), Decimal(0)) + cycle_options_pnl
+    underlying_pnl = sum((p.underlying_pnl for p in closed), Decimal(0)) + cycle_stock_pnl
+    total_pnl = sum((p.total_pnl for p in closed), Decimal(0)) + cycle_total_pnl
 
     premium_collected = sum((p.total_premium for p in closed if p.total_premium > 0), Decimal(0))
     premium_paid = sum((p.total_premium for p in closed if p.total_premium < 0), Decimal(0))
@@ -211,12 +247,13 @@ async def get_overall_stats(
 
     return OverallStats(
         total_positions=len(positions),
-        closed_positions=len(closed),
+        # Closed-trade count = standalone closed positions PLUS closed cycles.
+        closed_positions=len(closed) + len(closed_cycles),
         open_positions=len(open_positions),
-        winners=len(winners),
-        losers=len(losers),
-        breakeven_count=len(breakeven),
-        win_rate=len(winners) / decisive * 100 if decisive else 0,
+        winners=win_count,
+        losers=loss_count,
+        breakeven_count=breakeven_count,
+        win_rate=(win_count / decisive * 100) if decisive else 0,
         expired=expired,
         assigned=assigned,
         closed_early=closed_early,
@@ -412,19 +449,49 @@ async def get_strategy_breakdown(
     db: AsyncSession,
     date_range: Optional[DateRange] = None,
 ) -> dict[str, dict]:
-    """Get performance breakdown by strategy within the chosen window."""
+    """Get performance breakdown by strategy within the chosen window.
+
+    Wheel-aware: positions belonging to a closed wheel cycle are pulled
+    out of their per-leg buckets (SHORT PUT / SHORT CALL) and rolled
+    into a single WHEEL bucket using the cycle's total P&L. Otherwise
+    a profitable wheel would split into an apparent SHORT PUT loss and
+    SHORT CALL win, making both strategies look misleading.
+    """
+    from app.models import WheelCycle
+    from app.services.wheel_detection import position_ids_in_cycles
+
     dr = date_range or DateRange(None, None, "ALL")
     stmt = select(OptionPosition).where(OptionPosition.is_closed == True)
-    result = await db.execute(stmt)
-    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
+    raw = (await db.execute(stmt)).scalars().all()
+
+    wheel_pids = await position_ids_in_cycles(db)
+    positions = [
+        p for p in raw
+        if _in_range(p.close_date, dr) and p.id not in wheel_pids
+    ]
 
     strategies: dict[str, dict] = defaultdict(lambda: {'count': 0, 'pnl': Decimal(0), 'winners': 0})
 
     for p in positions:
         strategies[p.strategy]['count'] += 1
-        strategies[p.strategy]['pnl'] += p.total_pnl  # Use total_pnl
+        strategies[p.strategy]['pnl'] += p.total_pnl
         if p.total_pnl > 0:
             strategies[p.strategy]['winners'] += 1
+
+    # Add closed wheel cycles as their own bucket.
+    cycles = [
+        c for c in (await db.execute(
+            select(WheelCycle).where(WheelCycle.status == "CLOSED")
+        )).scalars().all()
+        if _in_range(c.ended_at, dr)
+    ]
+    if cycles:
+        bucket = strategies["WHEEL"]
+        for c in cycles:
+            bucket['count'] += 1
+            bucket['pnl'] += c.total_pnl
+            if c.total_pnl > 0:
+                bucket['winners'] += 1
 
     result_dict = {}
     for strategy, data in strategies.items():

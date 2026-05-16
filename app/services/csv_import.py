@@ -567,38 +567,67 @@ def _pick_position_for_underlying(
 async def link_underlying_trades(
     db: AsyncSession,
     underlying_trades: list[ParsedUnderlyingTrade],
-    assigned_positions: dict[str, list[OptionPosition]]
+    assigned_positions: dict[str, list[OptionPosition]],
+    options_symbols: Optional[set[str]] = None,
 ) -> int:
-    """Link underlying stock trades to their corresponding option positions.
+    """Persist underlying stock trades, optionally linked to a specific
+    assigned option position.
 
-    `assigned_positions` is now a dict of symbol -> list of candidate positions
-    (one symbol can have multiple simultaneous assignments). The picker uses
-    trade direction + nearest expiration to choose the right one.
+    Behaviour depends on `options_symbols`:
+
+      - If provided: any stock trade whose symbol is in the set is
+        persisted, regardless of whether it matches an assigned option
+        position. Trades that DO match get position_id set; trades that
+        don't get position_id = NULL. This is the right behaviour for
+        users who only trade options on tickers that aren't part of
+        their buy-and-hold portfolio — every stock movement on such
+        tickers belongs to a wheel cycle (active or about to start).
+
+      - If None (legacy): only stock trades matchable to an assigned
+        position via direction + strike are persisted. Older behaviour
+        used when callers haven't computed the options-symbol set.
+
+    Returns the number of new UnderlyingTrade rows added (excluding
+    duplicates already present in the DB).
     """
+    options_symbols = options_symbols or set()
     linked_count = 0
 
     for ut in underlying_trades:
         candidates = assigned_positions.get(ut.symbol, [])
-        position = _pick_position_for_underlying(ut, candidates)
+        position = _pick_position_for_underlying(ut, candidates) if candidates else None
 
-        if not position:
+        # Decide whether to persist this row at all.
+        if position is None and ut.symbol not in options_symbols:
+            # Symbol has no options activity at all → likely a buy-and-hold
+            # stock we don't track. Drop it.
             continue
 
-        # Check for duplicates
-        if await underlying_trade_exists(db, position.id, ut.trade_date, ut.amount):
-            continue
+        # Duplicate check: for linked trades, by position_id; for unlinked
+        # trades, by symbol+date+amount so re-imports don't double-insert.
+        if position is not None:
+            if await underlying_trade_exists(db, position.id, ut.trade_date, ut.amount):
+                continue
+        else:
+            stmt = select(UnderlyingTrade).where(
+                UnderlyingTrade.symbol == ut.symbol,
+                UnderlyingTrade.trade_date == ut.trade_date,
+                UnderlyingTrade.amount == ut.amount,
+                UnderlyingTrade.position_id.is_(None),
+            )
+            if (await db.execute(stmt)).scalar_one_or_none() is not None:
+                continue
 
-        underlying_trade = UnderlyingTrade(
-            position_id=position.id,
+        db.add(UnderlyingTrade(
+            position_id=(position.id if position else None),
             symbol=ut.symbol,
             trade_date=ut.trade_date,
             action=ut.action,
             quantity=ut.quantity,
             price=ut.price,
             amount=ut.amount,
-            trade_type=ut.trade_type
-        )
-        db.add(underlying_trade)
+            trade_type=ut.trade_type,
+        ))
         linked_count += 1
 
     return linked_count
@@ -680,9 +709,20 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
         if pos not in bucket:
             bucket.append(pos)
 
-    # Link underlying trades to assigned positions
-    if parsed_underlying and assigned_positions:
-        linked = await link_underlying_trades(db, parsed_underlying, assigned_positions)
+    # Link underlying trades. We compute the set of options-active symbols
+    # (anything that's ever appeared in OptionContract) so that stock
+    # trades on those tickers persist even when they don't match a specific
+    # assignment — that's what makes manual sales drain a wheel cycle's
+    # holdings correctly.
+    if parsed_underlying:
+        options_symbols = {
+            s for (s,) in (await db.execute(
+                select(OptionContract.symbol).distinct()
+            )).all()
+        }
+        linked = await link_underlying_trades(
+            db, parsed_underlying, assigned_positions, options_symbols=options_symbols,
+        )
         imported += linked
 
         # Update underlying P&L for every potentially affected position
@@ -708,4 +748,21 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
     db.add(log)
 
     await db.commit()
+
+    # Re-detect wheel cycles for every symbol touched by this import. The
+    # detection rebuilds idempotently per symbol so this is safe even when
+    # the same import gets re-run. Skipped if the import was a no-op.
+    if affected_contracts:
+        from app.services.wheel_detection import detect_wheel_cycles_for_symbol
+        symbols_touched = {c.symbol for c in affected_contracts}
+        for sym in symbols_touched:
+            try:
+                await detect_wheel_cycles_for_symbol(db, sym)
+            except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).exception(
+                    "Wheel detection failed for %s: %s", sym, e
+                )
+        await db.commit()
+
     return imported, skipped

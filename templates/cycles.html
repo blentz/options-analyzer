@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}Wheel Cycles - Options Trading Analyzer{% endblock %}
+
+{% block content %}
+<h1>Wheel Cycles</h1>
+<p style="color: #888; margin-bottom: 0.5rem;">
+    Each row is one wheel cycle — a continuous chain of cash-secured puts,
+    stock holding, and covered calls on a single symbol. Win/loss and P&L
+    are computed at the cycle level, not per option leg.
+</p>
+<div style="margin-bottom: 1rem; padding: 0.6rem 0.9rem; background-color: #1a2a3a; border-left: 4px solid #3b82f6; border-radius: 4px; color: #ccc; font-size: 0.8rem;">
+    Cycles are detected from your imported data after each upload. To force
+    a full re-detect (e.g., after a code change), run
+    <code style="background: #252525; padding: 0.05rem 0.3rem; border-radius: 3px;">curl -X POST http://localhost:8000/api/cycles/rebuild</code>.
+</div>
+
+{# Time-range bar — shared partial. Cycles use started_at for ACTIVE rows,
+   ended_at for CLOSED rows; route's filter handles the picker. #}
+{% set range_target = "/cycles" %}
+{% set extra_query = ('&status=' ~ status_filter|lower) if status_filter else '' %}
+{% set extra_hidden = {'status': status_filter|lower} if status_filter else {} %}
+{% include "_time_range_bar.html" with context %}
+
+{# Status filter — preserve current range when flipping tabs. #}
+{% set _range_q = ('&range=' ~ date_range.label|lower) if not date_range.is_unbounded else '' %}
+{% set _date_q = ('&start=' ~ custom_start ~ '&end=' ~ custom_end) if date_range.label == 'Custom' else '' %}
+<div class="filter-bar">
+    <a href="/cycles?{{ _range_q[1:] if _range_q else '' }}{{ _date_q }}"
+       class="btn {% if not status_filter %}btn-primary{% else %}btn-secondary{% endif %}">All</a>
+    <a href="/cycles?status=active{{ _range_q }}{{ _date_q }}"
+       class="btn {% if status_filter == 'ACTIVE' %}btn-primary{% else %}btn-secondary{% endif %}">Active</a>
+    <a href="/cycles?status=closed{{ _range_q }}{{ _date_q }}"
+       class="btn {% if status_filter == 'CLOSED' %}btn-primary{% else %}btn-secondary{% endif %}">Closed</a>
+</div>
+
+{% if not cycles %}
+<div class="alert" style="background-color: #252525; border: 1px solid #444; padding: 1.5rem; border-radius: 8px;">
+    <p style="color: #888; margin: 0;">No wheel cycles detected.</p>
+    <p style="color: #666; margin-top: 0.5rem; font-size: 0.9rem;">
+        Cycles form from a SHORT PUT that gets assigned, followed by a
+        SHORT CALL against the resulting shares. Import some Fidelity CSVs
+        from periods when you ran the wheel, or hit
+        <code>/api/cycles/rebuild</code> to re-scan.
+    </p>
+</div>
+{% else %}
+
+{# Aggregate row at the top so you can see overall wheel performance at a glance. #}
+{% set _closed = cycles | selectattr('status', 'equalto', 'CLOSED') | list %}
+{% set _wins = _closed | selectattr('total_pnl', 'gt', 0) | list %}
+{% set _losses = _closed | selectattr('total_pnl', 'lt', 0) | list %}
+{% set _decisive = _wins|length + _losses|length %}
+<div class="stats-grid" style="margin-bottom: 1.5rem;">
+    <div class="stat-card">
+        <div class="label">Cycles ({{ status_filter|title or 'All' }})</div>
+        <div class="value">{{ cycles|length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Closed</div>
+        <div class="value">{{ _closed|length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Win Rate (closed)</div>
+        <div class="value {% if _decisive and _wins|length / _decisive >= 0.5 %}positive{% elif _decisive %}negative{% endif %}">
+            {% if _decisive %}{{ "{:.0f}".format(_wins|length / _decisive * 100) }}%{% else %}--{% endif %}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            {{ _wins|length }}W / {{ _losses|length }}L
+        </div>
+    </div>
+    {% set _total = _closed | sum(attribute='total_pnl') %}
+    <div class="stat-card">
+        <div class="label">Closed P&L</div>
+        <div class="value {% if _total >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(_total) }}
+        </div>
+    </div>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Symbol</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th>Ended</th>
+            <th>Legs</th>
+            <th>Held</th>
+            <th>Options P&L</th>
+            <th>Stock P&L</th>
+            <th>Total P&L</th>
+            <th>Result</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in cycles %}
+        <tr>
+            <td><strong>{{ c.symbol }}</strong></td>
+            <td>
+                {% if c.status == 'CLOSED' %}
+                    <span class="tag closed">CLOSED</span>
+                {% else %}
+                    <span class="tag open">ACTIVE</span>
+                {% endif %}
+            </td>
+            <td>{{ c.started_at.strftime('%m/%d/%y') if c.started_at else '-' }}</td>
+            <td>{{ c.ended_at.strftime('%m/%d/%y') if c.ended_at else '-' }}</td>
+            <td style="font-size: 0.85rem;">
+                {{ c.num_puts }} put{{ 's' if c.num_puts != 1 else '' }} /
+                {{ c.num_calls }} call{{ 's' if c.num_calls != 1 else '' }}
+            </td>
+            <td>
+                {% if c.shares_held %}
+                    {{ c.shares_held }} @ ${{ "{:.2f}".format(c.avg_cost_basis) }}
+                {% else %}
+                    <span style="color: #666;">—</span>
+                {% endif %}
+            </td>
+            <td class="money {% if c.options_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "{:,.2f}".format(c.options_pnl) }}
+            </td>
+            <td class="money {% if c.stock_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "{:,.2f}".format(c.stock_pnl) }}
+            </td>
+            <td class="money {% if c.total_pnl >= 0 %}positive{% else %}negative{% endif %}" style="font-weight: 600;">
+                ${{ "{:,.2f}".format(c.total_pnl) }}
+            </td>
+            <td>
+                {% if c.status == 'CLOSED' %}
+                    {% if c.total_pnl > 0 %}<span class="tag winner">WIN</span>
+                    {% elif c.total_pnl < 0 %}<span class="tag loser">LOSS</span>
+                    {% else %}<span class="tag closed">EVEN</span>{% endif %}
+                {% else %}
+                    <span class="tag open">RUNNING</span>
+                {% endif %}
+            </td>
+        </tr>
+        {# Expandable legs row — always visible for now; can collapse later. #}
+        <tr>
+            <td colspan="10" style="background-color: #181818; padding: 0.5rem 1rem;">
+                <div style="font-size: 0.8rem; color: #888;">
+                    {% for m in c.members %}
+                    <div style="display: inline-block; margin-right: 1.5rem; margin-bottom: 0.25rem;">
+                        <span class="tag {% if m.role == 'CSP' %}assigned{% else %}expired{% endif %}" style="font-size: 0.65rem;">{{ m.role }}</span>
+                        {{ m.contract }}
+                        — <span style="color: #888;">{{ m.outcome }}</span>
+                        ${{ "{:,.2f}".format(m.net_pnl) }}
+                    </div>
+                    {% endfor %}
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

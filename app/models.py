@@ -117,7 +117,15 @@ class UnderlyingTrade(Base):
     __tablename__ = "underlying_trades"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    position_id: Mapped[int] = mapped_column(ForeignKey("option_positions.id"), index=True)
+    # Optional link to a specific assigned option position. NULL when the
+    # stock movement is a manual buy/sell on an options-active ticker but
+    # doesn't correspond to any single assignment — e.g., user sold half
+    # the assigned lot manually, or rolled out of stock between covered
+    # calls. Cycle detection (wheel_detection.py) walks ALL UnderlyingTrade
+    # rows for the symbol regardless of this link.
+    position_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("option_positions.id"), index=True, nullable=True
+    )
     symbol: Mapped[str] = mapped_column(String(20), index=True)
     trade_date: Mapped[datetime] = mapped_column(DateTime, index=True)
     action: Mapped[str] = mapped_column(String(20))  # BUY, SELL
@@ -126,8 +134,8 @@ class UnderlyingTrade(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # Net cash flow
     trade_type: Mapped[str] = mapped_column(String(20))  # ASSIGNMENT, EXERCISE, COVER
 
-    # Relationships
-    position: Mapped["OptionPosition"] = relationship(back_populates="underlying_trades")
+    # Optional back-reference. Populated only when position_id is set.
+    position: Mapped[Optional["OptionPosition"]] = relationship(back_populates="underlying_trades")
 
 
 class ImportLog(Base):
@@ -139,6 +147,83 @@ class ImportLog(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     records_imported: Mapped[int] = mapped_column(Integer, default=0)
     records_skipped: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WheelCycle(Base):
+    """One wheel-strategy cycle on a single symbol.
+
+    A cycle starts when you sell a cash-secured put on a symbol you don't
+    already own (or already have an active cycle for). It accumulates
+    shares via put assignments, sheds them via covered-call assignments
+    (or manual sales), and is considered CLOSED when shares_held drops
+    back to zero AND every option position in the cycle has closed.
+
+    A symbol can have multiple cycles over its lifetime (cycle A closes
+    cleanly, weeks later you start cycle B with a new CSP). They're
+    independent — P&L, win/loss, holding period are all per-cycle.
+
+    The win-rate problem this solves: a profitable wheel ($200 put
+    premium + $500 stock gain + $150 call premium = +$850) was previously
+    stored as ONE LOSS (the put: +200 premium − 9500 buy = −9300) and
+    ONE WIN (the call: +150 premium + 10000 sell = +10150). Aggregate
+    summed right; the per-position view and the win rate were both wrong.
+    """
+    __tablename__ = "wheel_cycles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(10), default="ACTIVE", index=True)  # ACTIVE | CLOSED
+
+    # Cost basis tracking (running state for ACTIVE cycles, final value
+    # is meaningless for CLOSED cycles since shares_held is always 0).
+    shares_held: Mapped[int] = mapped_column(Integer, default=0)
+    avg_cost_basis: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=0)
+
+    # Realized P&L components — populated by the detection service.
+    options_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    stock_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    total_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+
+    # Counts for quick UI display without joining members.
+    num_puts: Mapped[int] = mapped_column(Integer, default=0)
+    num_calls: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+    members: Mapped[list["WheelCycleMember"]] = relationship(
+        back_populates="cycle", cascade="all, delete-orphan"
+    )
+
+    @property
+    def is_winner(self) -> bool:
+        return self.total_pnl > 0
+
+
+class WheelCycleMember(Base):
+    """Association: which OptionPositions participate in which WheelCycle.
+
+    Unique on position_id — a single position can belong to at most one
+    cycle. `sequence` is the chronological order within the cycle so the
+    UI can render legs in the order they happened.
+    """
+    __tablename__ = "wheel_cycle_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("wheel_cycles.id"), index=True)
+    position_id: Mapped[int] = mapped_column(
+        ForeignKey("option_positions.id"), unique=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(4))  # CSP | CC
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+
+    cycle: Mapped["WheelCycle"] = relationship(back_populates="members")
 
 
 class PositionGroup(Base):

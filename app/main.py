@@ -304,6 +304,121 @@ async def import_diagnose(file: UploadFile = File(...)):
     }
 
 
+@app.get("/cycles", response_class=HTMLResponse)
+async def cycles_page(
+    request: Request,
+    status: Optional[str] = None,
+    range: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Wheel cycles list — each cycle is one trade, not N options legs.
+
+    Filters:
+      status  ACTIVE | CLOSED | (none = both)
+      range   Time window (uses ended_at for CLOSED cycles, started_at
+              for ACTIVE ones — both are checked so "Q2 2024" shows
+              cycles that overlapped the quarter in either direction).
+    """
+    from datetime import datetime as _dt
+    from app.models import WheelCycle as _WC, WheelCycleMember as _WCM
+    from app.services.analytics import _in_range as _inr
+
+    def _parse_iso(s):
+        if not s:
+            return None
+        try:
+            return _dt.fromisoformat(s)
+        except ValueError:
+            return None
+
+    date_range = resolve_date_range(range, _parse_iso(start), _parse_iso(end))
+
+    stmt = select(_WC).options(
+        selectinload(_WC.members).selectinload(_WCM.cycle)
+    ).order_by(_WC.started_at.desc())
+    if status and status.upper() in ("ACTIVE", "CLOSED"):
+        stmt = stmt.where(_WC.status == status.upper())
+
+    rows = list((await db.execute(stmt)).scalars().all())
+
+    # Apply the date filter in Python — cycles use started_at vs ended_at
+    # depending on status, which is awkward to express in SQL but trivial here.
+    if not date_range.is_unbounded:
+        kept = []
+        for c in rows:
+            ref_date = c.ended_at if c.status == "CLOSED" else c.started_at
+            if _inr(ref_date, date_range):
+                kept.append(c)
+        rows = kept
+
+    # Load member positions for each cycle so the UI can render the leg list.
+    member_position_ids = [m.position_id for c in rows for m in c.members]
+    pos_by_id = {}
+    if member_position_ids:
+        pstmt = select(OptionPosition).options(
+            selectinload(OptionPosition.contract)
+        ).where(OptionPosition.id.in_(member_position_ids))
+        pos_by_id = {p.id: p for p in (await db.execute(pstmt)).scalars().all()}
+
+    # Build view-models so the template doesn't navigate the SA graph itself.
+    view_rows = []
+    for c in rows:
+        members_view = []
+        for m in sorted(c.members, key=lambda mm: mm.sequence):
+            p = pos_by_id.get(m.position_id)
+            if not p:
+                continue
+            members_view.append({
+                "role": m.role,
+                "sequence": m.sequence,
+                "contract": p.contract.contract_id,
+                "open_date": p.open_date,
+                "close_date": p.close_date,
+                "outcome": p.outcome,
+                "net_pnl": float(p.net_pnl),
+                "is_closed": p.is_closed,
+            })
+        view_rows.append({
+            "id": c.id,
+            "symbol": c.symbol,
+            "status": c.status,
+            "started_at": c.started_at,
+            "ended_at": c.ended_at,
+            "shares_held": c.shares_held,
+            "avg_cost_basis": float(c.avg_cost_basis or 0),
+            "options_pnl": float(c.options_pnl),
+            "stock_pnl": float(c.stock_pnl),
+            "total_pnl": float(c.total_pnl),
+            "num_puts": c.num_puts,
+            "num_calls": c.num_calls,
+            "members": members_view,
+        })
+
+    return templates.TemplateResponse("cycles.html", {
+        "request": request,
+        "cycles": view_rows,
+        "date_range": date_range,
+        "preset_labels": PRESET_RANGE_LABELS,
+        "custom_start": start or "",
+        "custom_end": end or "",
+        "status_filter": (status or "").upper(),
+    })
+
+
+@app.post("/api/cycles/rebuild")
+async def rebuild_cycles(db: AsyncSession = Depends(get_db)):
+    """One-shot: re-detect wheel cycles for every symbol.
+
+    Useful after a code change to the detector or to recover from any
+    state drift. Idempotent — wipes and re-derives each symbol's cycles.
+    """
+    from app.services.wheel_detection import detect_all_wheel_cycles
+    counts = await detect_all_wheel_cycles(db)
+    return {"rebuilt": counts, "total_cycles": sum(counts.values())}
+
+
 @app.get("/health")
 async def health():
     """Liveness probe — process is up and accepting requests."""
