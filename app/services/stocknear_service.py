@@ -445,8 +445,8 @@ async def get_live_iv_for_symbols(
     
     Returns dict mapping symbol -> IV (as decimal, e.g., 0.35 for 35%)
     """
-    results = {}
-    
+    results: dict[str, Optional[float]] = {}
+
     for symbol in symbols:
         options_data = await get_options_overview(db, symbol, force_refresh)
         if options_data and options_data.implied_volatility:
@@ -616,13 +616,16 @@ async def get_available_expirations(
     cache_key = f"expirations:{symbol}"
     
     if not force_refresh:
-        cached = await get_cached_data(db, cache_key)
-        if cached and isinstance(cached, list):
+        cached: object = await get_cached_data(db, cache_key)
+        # Historical rows may be either a raw list or a {"expirations": [...]}
+        # dict — handle both shapes.
+        if isinstance(cached, list):
             logger.debug("Returning cached expirations for %s (%d dates)", symbol, len(cached))
             return cached
-        if cached and isinstance(cached, dict) and "expirations" in cached:
-            logger.debug("Returning cached expirations for %s (%d dates)", symbol, len(cached["expirations"]))
-            return cached["expirations"]
+        if isinstance(cached, dict) and "expirations" in cached:
+            exps = cached["expirations"]
+            logger.debug("Returning cached expirations for %s (%d dates)", symbol, len(exps))
+            return exps
     
     logger.info("Fetching fresh expirations for %s", symbol)
     try:
@@ -976,9 +979,9 @@ async def get_contract_quotes_batch(
     if not contracts:
         return []
     
-    results = []
-    contracts_to_fetch = []
-    cache_indices = {}  # Maps fetch index to result index
+    results: list[tuple[int, Optional[ContractQuote]]] = []
+    contracts_to_fetch: list[dict] = []
+    cache_indices: dict[int, int] = {}  # Maps fetch index to result index
     
     # Check cache for each contract
     for i, contract in enumerate(contracts):

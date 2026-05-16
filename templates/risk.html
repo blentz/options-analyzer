@@ -516,14 +516,14 @@
                 
                 <!-- Custom Exit Calculator -->
                 <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #333;">
-                    <!-- Volatility Input -->
-                    <div style="margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <!-- Volatility Input + persistent override -->
+                    <div style="margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                         <label style="color: #888; font-size: 0.8rem;">
                             Implied Volatility:
                         </label>
-                        <input type="number" 
-                               step="1" 
-                               min="5" 
+                        <input type="number"
+                               step="1"
+                               min="5"
                                max="200"
                                value="{{ "{:.0f}".format((item.analysis.implied_volatility or 0.30) * 100) }}"
                                id="volatility-{{ loop.index }}"
@@ -536,6 +536,17 @@
                             {{ item.analysis.iv_source }}
                         </span>
                         {% endif %}
+                        <button onclick="saveIvOverride('{{ item.analysis.contract_id }}', {{ loop.index }})"
+                                style="background: #444; border: 1px solid #555; color: #e0e0e0; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.7rem;"
+                                title="Persist this IV value to the database — used until you change or clear it">
+                            Pin
+                        </button>
+                        <button onclick="clearIvOverride('{{ item.analysis.contract_id }}')"
+                                style="background: #2a1a1a; border: 1px solid #553; color: #ccc; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.7rem;"
+                                title="Clear pinned IV and revert to live source">
+                            Clear
+                        </button>
+                        <span id="iv-override-status-{{ loop.index }}" style="font-size: 0.7rem; color: #888;"></span>
                     </div>
                     
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
@@ -752,6 +763,48 @@ function getAssignmentProbColor(prob) {
     if (prob > 50) return '#ef4444';  // High assignment risk - red
     if (prob > 25) return '#f59e0b';  // Medium - orange
     return '#22c55e';  // Low - green
+}
+
+async function saveIvOverride(contractId, index) {
+    const volInput = document.getElementById(`volatility-${index}`);
+    const statusEl = document.getElementById(`iv-override-status-${index}`);
+    const vol = parseFloat(volInput.value);
+    if (!vol || vol <= 0) {
+        statusEl.innerHTML = '<span style="color: #ef4444;">Invalid IV</span>';
+        return;
+    }
+    try {
+        const res = await fetch(`/api/positions/${encodeURIComponent(contractId)}/iv-override`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({volatility: vol / 100}),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({detail: res.statusText}));
+            statusEl.innerHTML = `<span style="color: #ef4444;">${err.detail || 'error'}</span>`;
+            return;
+        }
+        statusEl.innerHTML = '<span style="color: #22c55e;">Pinned. Reload to recompute.</span>';
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color: #ef4444;">${e.message}</span>`;
+    }
+}
+
+async function clearIvOverride(contractId) {
+    try {
+        const res = await fetch(`/api/positions/${encodeURIComponent(contractId)}/iv-override`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({volatility: null}),
+        });
+        if (!res.ok) {
+            alert('Failed to clear override');
+            return;
+        }
+        location.reload();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
 }
 
 async function calculateExit(contractId, type, index) {

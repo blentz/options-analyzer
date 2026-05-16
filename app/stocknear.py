@@ -1,259 +1,46 @@
-"""
-StockNear browser scraper using Playwright with LibreWolf cookies.
-Provides authenticated access to stocknear.com data.
+"""StockNear browser scraper using Playwright with LibreWolf cookies.
 
-Configuration is loaded from environment variables via app.config.
+Provides authenticated access to stocknear.com data. Configuration is
+loaded from environment variables via app.config.
+
+Module layout:
+  - Data shapes (OptionContract, ContractQuote, etc) live in
+    `app.stocknear_models` so consumers can import them without Playwright.
+  - Cookie extraction lives in `app.stocknear_cookies` for the same reason.
+  - This file holds the StockNearScraper class itself and the CLI entry
+    point. The dataclasses + cookie helper are re-exported below so the
+    historical `from app.stocknear import OptionContract` etc. continue
+    to work.
 """
 
 import json
 import logging
 import re
-import sqlite3
-import shutil
 import sys
-import tempfile
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from app.config import settings
+from app.stocknear_models import (
+    OptionContract,
+    ContractQuote,
+    OptionsChain,
+    OptionsData,
+    StockData,
+)
+from app.stocknear_cookies import extract_browser_cookies
+
+# Re-exported public API — keep these names available for callers that
+# `from app.stocknear import OptionContract`. Without __all__ the names are
+# still importable; this just documents intent.
+__all__ = [
+    "OptionContract", "ContractQuote", "OptionsChain", "OptionsData",
+    "StockData", "extract_browser_cookies", "StockNearScraper",
+]
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class OptionContract:
-    """Individual option contract from options chain."""
-    strike: float
-    option_type: str  # "CALL" or "PUT"
-    expiration: str  # Date string like "2025-03-21"
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    last: Optional[float] = None
-    volume: Optional[int] = None
-    open_interest: Optional[int] = None
-    implied_volatility: Optional[float] = None  # As decimal (0.35 = 35%)
-    delta: Optional[float] = None
-    gamma: Optional[float] = None
-    theta: Optional[float] = None
-    vega: Optional[float] = None
-    
-    @property
-    def mid_price(self) -> Optional[float]:
-        """Mid of bid/ask, or None when both are unavailable.
-
-        Previously this silently fell back to `last`, which can be days old
-        for illiquid contracts. Callers that intentionally want last-trade
-        as a fallback should do so explicitly so the staleness is visible
-        in the call site rather than buried inside this property.
-        """
-        if self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > 0:
-            return (self.bid + self.ask) / 2
-        return None
-
-
-@dataclass
-class ContractQuote:
-    """Real-time quote data for a specific option contract from StockNear."""
-    symbol: str
-    strike: float
-    option_type: str  # "CALL" or "PUT"
-    expiration: str  # Date string like "2025-03-21"
-    contract_id: str  # StockNear contract ID like "BEPC260320P00035000"
-    
-    # Price data
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    mid: Optional[float] = None
-    last: Optional[float] = None
-    open_price: Optional[float] = None
-    
-    # Volume data
-    volume: Optional[int] = None
-    open_interest: Optional[int] = None
-    
-    # Greeks
-    implied_volatility: Optional[float] = None  # As decimal (0.35 = 35%)
-    delta: Optional[float] = None
-    gamma: Optional[float] = None
-    theta: Optional[float] = None
-    vega: Optional[float] = None
-
-    raw_content: str = ""
-
-    @property
-    def spread_quality(self) -> str:
-        """
-        Classify the bid/ask spread so the UI can warn before users treat a
-        wide-spread `mid` as a real price. Categories:
-          - "tight"   : spread <= 5% of mid  (mid is meaningful)
-          - "moderate": 5% < spread <= 20%   (mid is approximate)
-          - "wide"    : 20% < spread <= 50%  (mid only a hint; expect slippage)
-          - "very_wide": spread > 50%        (mid is essentially fictional)
-          - "no_bid"  : bid is 0 or missing  (no real market)
-          - "no_quote": no bid AND no ask    (nothing to trade against)
-        """
-        if (self.bid is None or self.bid == 0) and (self.ask is None or self.ask == 0):
-            return "no_quote"
-        if self.bid is None or self.bid == 0:
-            return "no_bid"
-        if self.ask is None or self.ask == 0:
-            return "no_quote"
-        mid = (self.bid + self.ask) / 2
-        if mid <= 0:
-            return "no_quote"
-        spread_pct = (self.ask - self.bid) / mid
-        if spread_pct <= 0.05:
-            return "tight"
-        if spread_pct <= 0.20:
-            return "moderate"
-        if spread_pct <= 0.50:
-            return "wide"
-        return "very_wide"
-
-
-@dataclass
-class OptionsChain:
-    """Full options chain for a symbol."""
-    symbol: str
-    current_price: Optional[float] = None
-    expirations: list[str] = field(default_factory=list)  # Available expiration dates
-    contracts: list[OptionContract] = field(default_factory=list)
-    iv_rank: Optional[float] = None
-    iv_percentile: Optional[float] = None
-    implied_volatility: Optional[float] = None
-    raw_content: str = ""
-    
-    def get_strikes_for_expiration(self, expiration: str) -> list[float]:
-        """Get unique strikes for a given expiration."""
-        strikes = set()
-        for c in self.contracts:
-            if c.expiration == expiration:
-                strikes.add(c.strike)
-        return sorted(strikes)
-    
-    def get_contract(self, expiration: str, strike: float, option_type: str) -> Optional[OptionContract]:
-        """Get a specific contract."""
-        for c in self.contracts:
-            if c.expiration == expiration and c.strike == strike and c.option_type == option_type:
-                return c
-        return None
-    
-    def get_calls(self, expiration: str = None) -> list[OptionContract]:
-        """Get all call contracts, optionally filtered by expiration."""
-        return [c for c in self.contracts 
-                if c.option_type == "CALL" and (expiration is None or c.expiration == expiration)]
-    
-    def get_puts(self, expiration: str = None) -> list[OptionContract]:
-        """Get all put contracts, optionally filtered by expiration."""
-        return [c for c in self.contracts 
-                if c.option_type == "PUT" and (expiration is None or c.expiration == expiration)]
-
-
-@dataclass
-class OptionsData:
-    """Parsed options data from StockNear."""
-    symbol: str
-    iv_rank: Optional[float] = None  # IV Rank (0-100)
-    iv_percentile: Optional[float] = None  # IV Percentile (0-100)
-    implied_volatility: Optional[float] = None  # Current IV as decimal (e.g., 0.35 = 35%)
-    historical_volatility: Optional[float] = None  # HV as decimal
-    put_call_ratio: Optional[float] = None
-    total_volume: Optional[int] = None
-    total_open_interest: Optional[int] = None
-    max_pain: Optional[float] = None
-    raw_content: str = ""  # Raw page text for debugging
-
-
-@dataclass
-class StockData:
-    """Parsed stock data from StockNear."""
-    symbol: str
-    price: Optional[float] = None
-    change: Optional[float] = None
-    change_percent: Optional[float] = None
-    market_cap: Optional[str] = None
-    volume: Optional[int] = None
-    raw_content: str = ""
-
-
-def extract_browser_cookies(profile_path: str, domain_filter: str = "stocknear.com") -> list[dict]:
-    """Extract cookies from Firefox/LibreWolf cookies.sqlite for a specific domain.
-
-    The cookies file is opened by a running browser, so we copy it into a
-    private temporary directory before reading. Using TemporaryDirectory
-    (instead of a manual NamedTemporaryFile + unlink in finally) ensures the
-    copy is removed even if the process is killed between copy and cleanup —
-    the OS-managed cleanup runs on directory __exit__ unconditionally.
-    """
-    cookies_db = Path(profile_path) / "cookies.sqlite"
-
-    if not cookies_db.exists():
-        logger.error("cookies.sqlite not found at %s", cookies_db)
-        return []
-
-    logger.debug("Extracting cookies from %s for domain %s", cookies_db, domain_filter)
-
-    cookies: list[dict] = []
-    with tempfile.TemporaryDirectory(prefix="cookies-") as tmpdir:
-        tmp_path = Path(tmpdir) / "cookies.sqlite"
-        # Restrict perms so other users on the host can't read it while alive
-        shutil.copy(cookies_db, tmp_path)
-        try:
-            tmp_path.chmod(0o600)
-        except Exception:
-            pass
-
-        conn = sqlite3.connect(str(tmp_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite
-                FROM moz_cookies
-                WHERE host LIKE ?
-                """,
-                (f"%{domain_filter}%",),
-            )
-            for row in cursor.fetchall():
-                name, value, host, path, expiry, is_secure, is_http_only, same_site = row
-                same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
-                cookie = {
-                    "name": name,
-                    "value": value,
-                    "domain": host,
-                    "path": path,
-                    "secure": bool(is_secure),
-                    "httpOnly": bool(is_http_only),
-                    "sameSite": same_site_map.get(same_site, "Lax"),
-                }
-                if expiry and expiry > 0:
-                    if expiry > 10000000000000:
-                        cookie["expires"] = expiry // 1000000
-                    elif expiry > 10000000000:
-                        cookie["expires"] = expiry // 1000
-                    else:
-                        cookie["expires"] = expiry
-                cookies.append(cookie)
-        finally:
-            conn.close()
-
-    logger.info("Extracted %d cookies for domain %s", len(cookies), domain_filter)
-    if cookies:
-        # Don't log values; only metadata.
-        import time as time_module
-        now = time_module.time()
-        for c in cookies:
-            if c["name"] in ("pb_auth", "session", "auth", "token", "cf_clearance"):
-                expires = c.get("expires", 0)
-                is_expired = expires > 0 and expires < now
-                logger.info(
-                    "Auth cookie '%s': domain=%s, expires=%s, expired=%s",
-                    c["name"], c["domain"], expires, is_expired
-                )
-    return cookies
 
 
 class StockNearScraper:

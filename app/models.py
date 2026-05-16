@@ -84,6 +84,12 @@ class OptionPosition(Base):
     underlying_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     total_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)  # net_pnl + underlying_pnl
 
+    # Per-position implied-volatility override. NULL = use the live IV from
+    # StockNear (or the default). Operators can pin a value here when they
+    # disagree with the scraped IV (e.g., after a recent earnings event the
+    # IV crush hasn't propagated yet, or they want to stress-test).
+    volatility_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
+
     # Audit timestamps — track when the row was first written and last
     # mutated. Particularly useful with the new auto-EXPIRED grace period:
     # operators can see exactly when a position's outcome was changed by
@@ -133,6 +139,43 @@ class ImportLog(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     records_imported: Mapped[int] = mapped_column(Integer, default=0)
     records_skipped: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PositionGroup(Base):
+    """Operator-defined grouping of OptionPositions into one strategy.
+
+    The risk page's heuristic (same symbol + expiration + open-day) handles
+    the obvious cases, but it both over-groups (two unrelated covered calls
+    opened the same day) and under-groups (legs of one trade entered across
+    days). PositionGroup lets the operator pin a definitive grouping that
+    overrides the heuristic.
+
+    When a position belongs to a manual group, the heuristic is ignored for
+    that position. Members of explicit groups never get absorbed into a
+    heuristic group of a different membership.
+    """
+    __tablename__ = "position_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    members: Mapped[list["PositionGroupMember"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class PositionGroupMember(Base):
+    """Association: which OptionPositions belong to which PositionGroup."""
+    __tablename__ = "position_group_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("position_groups.id"), index=True)
+    position_id: Mapped[int] = mapped_column(
+        ForeignKey("option_positions.id"), unique=True, index=True
+    )
+
+    group: Mapped["PositionGroup"] = relationship(back_populates="members")
 
 
 class StockNearCache(Base):

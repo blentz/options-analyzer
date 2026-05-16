@@ -145,7 +145,7 @@ async def get_pnl_by_symbol(db: AsyncSession) -> list[SymbolStats]:
     result = await db.execute(stmt)
     positions = list(result.scalars().all())
 
-    symbol_data = defaultdict(lambda: {'pnl': Decimal(0), 'count': 0, 'winners': 0})
+    symbol_data: dict[str, dict] = defaultdict(lambda: {'pnl': Decimal(0), 'count': 0, 'winners': 0})
 
     for p in positions:
         symbol = p.contract.symbol
@@ -175,7 +175,10 @@ async def get_monthly_pnl(db: AsyncSession) -> list[MonthlyStats]:
     result = await db.execute(stmt)
     positions = list(result.scalars().all())
 
-    monthly_data = defaultdict(lambda: {'pnl': Decimal(0), 'trades': 0, 'winners': 0, 'losers': 0})
+    # Explicit annotation so mypy can't think the dict values are `object`.
+    monthly_data: dict[str, dict] = defaultdict(
+        lambda: {'pnl': Decimal(0), 'trades': 0, 'winners': 0, 'losers': 0}
+    )
 
     for p in positions:
         if p.close_date:
@@ -194,7 +197,7 @@ async def get_monthly_pnl(db: AsyncSession) -> list[MonthlyStats]:
             pnl=data['pnl'],
             num_trades=data['trades'],
             winners=data['winners'],
-            losers=data['losers']
+            losers=data['losers'],
         ))
 
     return stats
@@ -260,7 +263,7 @@ async def get_strategy_breakdown(db: AsyncSession) -> dict[str, dict]:
     result = await db.execute(stmt)
     positions = list(result.scalars().all())
 
-    strategies = defaultdict(lambda: {'count': 0, 'pnl': Decimal(0), 'winners': 0})
+    strategies: dict[str, dict] = defaultdict(lambda: {'count': 0, 'pnl': Decimal(0), 'winners': 0})
 
     for p in positions:
         strategies[p.strategy]['count'] += 1

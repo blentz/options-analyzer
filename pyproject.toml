@@ -19,12 +19,15 @@ dependencies = [
     "scipy==1.14.1",
     "yfinance==0.2.49",
     "requests",
+    "alembic==1.14.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==8.3.4",
     "pytest-asyncio==0.24.0",
+    "mypy==1.13.0",
+    "types-requests",
 ]
 
 [tool.pytest.ini_options]
@@ -34,6 +37,31 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-ra --strict-markers --tb=short"
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+# Pragmatic config: catch the worst stuff without forcing a full type
+# annotation pass on a hot-evolving codebase.
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+check_untyped_defs = true
+# Annotate gradually — don't fail just because something isn't typed yet.
+disallow_untyped_defs = false
+# These libs don't ship stubs.
+[[tool.mypy.overrides]]
+module = [
+    "yfinance",
+    "playwright.*",
+    "bokeh.*",
+    "scipy.*",
+    "pandas.*",
+    "aiosqlite.*",
+    "alembic.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"  # avoid attr-defined noise from third-party libs
 
 [build-system]
 requires = ["hatchling"]
