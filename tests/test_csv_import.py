@@ -290,3 +290,103 @@ def test_grace_period_covers_weekend():
     # 5 days covers Friday expiration + weekend + a settlement day.
     assert AUTO_EXPIRY_GRACE_DAYS >= 3
     assert AUTO_EXPIRY_GRACE_DAYS <= 14  # Sanity: not unbounded
+
+
+# ----------------------------------------------------------------------------
+# update_position: stale-position detection. Regression for the bug where
+# partial-close residuals (user opened N contracts, bought back fewer than
+# N to roll, leaving a tail) stayed is_closed=False forever even after the
+# contract expired years ago.
+# ----------------------------------------------------------------------------
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from app.database import Base
+from app.models import (
+    OptionContract as _OC, OptionPosition as _OP, OptionTrade as _OT,
+)
+from app.services.csv_import import update_position
+
+
+@pytest_asyncio.fixture
+async def healing_db():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("PRAGMA foreign_keys=ON"))
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as s:
+        yield s
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_partial_close_past_expiration_marked_closed(healing_db):
+    """Opened -16, bought back +14 (partial close, net -2 still 'open'),
+    then the contract expired 2 years ago. Position must end up
+    is_closed=True after update_position runs."""
+    db = healing_db
+    contract = _OC(
+        symbol="OLD",
+        expiration=date(2023, 1, 20),   # well past grace
+        strike=Decimal("5"),
+        option_type="CALL",
+    )
+    db.add(contract); await db.flush()
+    open_t = _OT(contract_id=contract.id, trade_date=datetime(2023, 1, 1),
+                  action="SOLD OPENING", quantity=-16, price=Decimal("1.0"),
+                  amount=Decimal("1600"), raw_symbol="-OLD")
+    partial_close = _OT(contract_id=contract.id, trade_date=datetime(2023, 1, 10),
+                        action="BOUGHT CLOSING", quantity=14, price=Decimal("0.5"),
+                        amount=Decimal("-700"), raw_symbol="-OLD")
+    db.add(open_t); db.add(partial_close)
+    await db.flush()
+    pos = await update_position(db, contract)
+    assert pos is not None
+    assert pos.is_closed is True, (
+        "partial-close residual past contract expiration must be is_closed=True"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_position_within_grace_stays_open(healing_db):
+    """Position whose contract expires TODAY but no closing trade exists
+    should stay is_closed=False during the grace window (so a
+    late-arriving assignment CSV can still flip it correctly)."""
+    db = healing_db
+    contract = _OC(
+        symbol="GRACE",
+        expiration=date.today(),  # within grace
+        strike=Decimal("10"),
+        option_type="PUT",
+    )
+    db.add(contract); await db.flush()
+    open_t = _OT(contract_id=contract.id, trade_date=datetime.now(),
+                  action="SOLD OPENING", quantity=-1, price=Decimal("1.0"),
+                  amount=Decimal("100"), raw_symbol="-GRACE")
+    db.add(open_t); await db.flush()
+    pos = await update_position(db, contract)
+    assert pos.is_closed is False, "in-grace position should NOT auto-close"
+
+
+@pytest.mark.asyncio
+async def test_future_open_position_unchanged(healing_db):
+    """Sanity: a genuinely live position (contract expires in the future)
+    must remain is_closed=False."""
+    db = healing_db
+    from datetime import timedelta
+    contract = _OC(
+        symbol="LIVE",
+        expiration=date.today() + timedelta(days=60),
+        strike=Decimal("100"),
+        option_type="CALL",
+    )
+    db.add(contract); await db.flush()
+    open_t = _OT(contract_id=contract.id, trade_date=datetime.now(),
+                  action="SOLD OPENING", quantity=-1, price=Decimal("1.0"),
+                  amount=Decimal("200"), raw_symbol="-LIVE")
+    db.add(open_t); await db.flush()
+    pos = await update_position(db, contract)
+    assert pos.is_closed is False

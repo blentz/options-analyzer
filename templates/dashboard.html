@@ -70,12 +70,31 @@
         </div>
     </div>
     <div class="stat-card">
-        <div class="label">Closed Positions</div>
+        <div class="label">Closed Trades</div>
         <div class="value">{{ stats.closed_positions }}</div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Standalone + wheel cycles
+        </div>
     </div>
     <div class="stat-card">
-        <div class="label">Open Positions</div>
+        <div class="label">Open Option Contracts</div>
         <div class="value">{{ stats.open_positions }}</div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Live, unsettled contracts only
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Active Wheel Cycles</div>
+        <div class="value {% if stats.active_cycle_count > 0 %}warning{% endif %}">
+            {{ stats.active_cycle_count }}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            {% if stats.active_cycle_count %}
+                Holding {{ stats.active_cycle_shares_held }} shares
+            {% else %}
+                No assigned stock currently held
+            {% endif %}
+        </div>
     </div>
     <div class="stat-card">
         <div class="label">W / L / BE</div>

@@ -428,11 +428,18 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
     if contract_expired and outcome == 'OPEN' and past_grace:
         outcome = 'EXPIRED'
 
-    # Position is closed if quantity is zero OR if it expired/was assigned.
-    # During the grace window a quantity-still-open position stays is_closed=False
-    # so re-imports can amend it; the risk page already filters past-expiration
-    # positions out of risk display.
-    is_closed = total_qty == 0 or outcome in ('EXPIRED', 'ASSIGNED')
+    # Position is closed if quantity is zero OR outcome is terminal OR the
+    # contract itself has expired past grace. The third condition catches
+    # partial-close residuals — when a user opened N contracts and bought
+    # back fewer than N to roll, leaving a tail that the standard logic
+    # (total_qty == 0 or outcome in terminal set) would otherwise leave
+    # as is_closed=False forever even after the contract has long since
+    # ceased to exist.
+    is_closed = (
+        total_qty == 0
+        or outcome in ('EXPIRED', 'ASSIGNED')
+        or past_grace
+    )
 
     # Get or create position
     stmt = select(OptionPosition).options(

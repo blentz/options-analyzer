@@ -437,6 +437,43 @@ async def cycles_page(
     })
 
 
+@app.post("/api/positions/heal")
+async def heal_positions(db: AsyncSession = Depends(get_db)):
+    """Re-run position-state derivation for every contract.
+
+    Fixes positions stuck with is_closed=False where the contract has
+    long since expired — typically partial-close residuals (user
+    opened N contracts, bought back fewer than N, the tail expired
+    but never got reflected). Idempotent: subsequent runs do nothing
+    if the data is already in the right state.
+
+    Returns a count of positions whose state actually changed.
+    """
+    from app.services.csv_import import update_position
+    from app.models import OptionContract as _OC
+
+    contracts = (await db.execute(select(_OC))).scalars().all()
+    changed = 0
+    for c in contracts:
+        # Snapshot before, derive, compare. update_position both fetches
+        # and mutates so we re-query is_closed/outcome to detect change.
+        before = await db.execute(
+            select(OptionPosition.is_closed, OptionPosition.outcome)
+            .where(OptionPosition.contract_id == c.id)
+        )
+        before_state = before.first()
+        await update_position(db, c)
+        after = await db.execute(
+            select(OptionPosition.is_closed, OptionPosition.outcome)
+            .where(OptionPosition.contract_id == c.id)
+        )
+        after_state = after.first()
+        if before_state != after_state:
+            changed += 1
+    await db.commit()
+    return {"contracts_processed": len(contracts), "positions_changed": changed}
+
+
 @app.post("/api/cycles/rebuild")
 async def rebuild_cycles(db: AsyncSession = Depends(get_db)):
     """One-shot: re-detect wheel cycles for every symbol.
