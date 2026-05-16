@@ -363,6 +363,13 @@ async def cycles_page(
         pos_by_id = {p.id: p for p in (await db.execute(pstmt)).scalars().all()}
 
     # Build view-models so the template doesn't navigate the SA graph itself.
+    # Mark active cycles to market with Yahoo prices so the page shows
+    # both realized stock_pnl AND current unrealized exposure on still-
+    # held shares. Yahoo is cached 60s so this is cheap.
+    from app.services.price_service import get_multiple_prices
+    active_symbols = sorted({c.symbol for c in rows if c.status == "ACTIVE" and c.shares_held > 0})
+    live_prices = await get_multiple_prices(active_symbols) if active_symbols else {}
+
     view_rows = []
     for c in rows:
         members_view = []
@@ -380,6 +387,18 @@ async def cycles_page(
                 "net_pnl": float(p.net_pnl),
                 "is_closed": p.is_closed,
             })
+        # Compute unrealized for ACTIVE cycles with held shares.
+        live_price = None
+        unrealized_stock_pnl = None
+        market_value = None
+        if c.status == "ACTIVE" and c.shares_held > 0:
+            quote = live_prices.get(c.symbol)
+            if quote and quote.price is not None:
+                live_price = float(quote.price)
+                avg_basis_f = float(c.avg_cost_basis or 0)
+                unrealized_stock_pnl = (live_price - avg_basis_f) * c.shares_held
+                market_value = live_price * c.shares_held
+
         view_rows.append({
             "id": c.id,
             "symbol": c.symbol,
@@ -391,6 +410,17 @@ async def cycles_page(
             "options_pnl": float(c.options_pnl),
             "stock_pnl": float(c.stock_pnl),
             "total_pnl": float(c.total_pnl),
+            "live_price": live_price,
+            "unrealized_stock_pnl": unrealized_stock_pnl,
+            "market_value": market_value,
+            # Realized + unrealized totals — what the user really wants to see.
+            "realized_total": float(c.total_pnl),
+            "unrealized_total": unrealized_stock_pnl,
+            "grand_total": (
+                float(c.total_pnl) + unrealized_stock_pnl
+                if unrealized_stock_pnl is not None
+                else float(c.total_pnl)
+            ),
             "num_puts": c.num_puts,
             "num_calls": c.num_calls,
             "members": members_view,

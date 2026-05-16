@@ -21,15 +21,44 @@
         <div class="value {% if stats.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
             ${{ "{:,.2f}".format(stats.total_pnl) }}
         </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Realized + unrealized
+        </div>
     </div>
     <div class="stat-card">
-        <div class="label">Options P&L</div>
+        <div class="label">Realized P&L</div>
+        <div class="value {% if stats.realized_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(stats.realized_pnl) }}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Closed positions + closed cycles
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Unrealized P&L</div>
+        <div class="value {% if stats.unrealized_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:,.2f}".format(stats.unrealized_pnl) }}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            {% if stats.active_cycle_count %}
+                MTM on {{ stats.active_cycle_shares_held }} shares
+                in {{ stats.active_cycle_count }} active cycle{{ 's' if stats.active_cycle_count != 1 else '' }}
+                {% if stats.unrealized_missing_symbols %}
+                <span style="color: #f59e0b;">({{ stats.unrealized_missing_symbols }} unpriced)</span>
+                {% endif %}
+            {% else %}
+                No active cycle holdings
+            {% endif %}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Options P&L (realized)</div>
         <div class="value {% if stats.options_pnl >= 0 %}positive{% else %}negative{% endif %}">
             ${{ "{:,.2f}".format(stats.options_pnl) }}
         </div>
     </div>
     <div class="stat-card">
-        <div class="label">Underlying P&L</div>
+        <div class="label">Underlying P&L (realized)</div>
         <div class="value {% if stats.underlying_pnl >= 0 %}positive{% else %}negative{% endif %}">
             ${{ "{:,.2f}".format(stats.underlying_pnl) }}
         </div>

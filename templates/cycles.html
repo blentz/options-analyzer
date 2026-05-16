@@ -86,10 +86,11 @@
             <th>Started</th>
             <th>Ended</th>
             <th>Legs</th>
-            <th>Held</th>
+            <th>Held / Mark</th>
             <th>Options P&L</th>
-            <th>Stock P&L</th>
-            <th>Total P&L</th>
+            <th>Stock P&L (real)</th>
+            <th>Unrealized</th>
+            <th>Grand Total</th>
             <th>Result</th>
         </tr>
     </thead>
@@ -110,9 +111,17 @@
                 {{ c.num_puts }} put{{ 's' if c.num_puts != 1 else '' }} /
                 {{ c.num_calls }} call{{ 's' if c.num_calls != 1 else '' }}
             </td>
-            <td>
+            <td style="font-size: 0.85rem;">
                 {% if c.shares_held %}
                     {{ c.shares_held }} @ ${{ "{:.2f}".format(c.avg_cost_basis) }}
+                    {% if c.live_price is not none %}
+                    <div style="color: #888; font-size: 0.75rem;">
+                        mark ${{ "{:.2f}".format(c.live_price) }} ·
+                        MV ${{ "{:,.0f}".format(c.market_value) }}
+                    </div>
+                    {% else %}
+                    <div style="color: #f59e0b; font-size: 0.75rem;">no live price</div>
+                    {% endif %}
                 {% else %}
                     <span style="color: #666;">—</span>
                 {% endif %}
@@ -123,8 +132,23 @@
             <td class="money {% if c.stock_pnl >= 0 %}positive{% else %}negative{% endif %}">
                 ${{ "{:,.2f}".format(c.stock_pnl) }}
             </td>
-            <td class="money {% if c.total_pnl >= 0 %}positive{% else %}negative{% endif %}" style="font-weight: 600;">
-                ${{ "{:,.2f}".format(c.total_pnl) }}
+            <td class="money">
+                {% if c.unrealized_stock_pnl is not none %}
+                    <span class="{% if c.unrealized_stock_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                        ${{ "{:,.2f}".format(c.unrealized_stock_pnl) }}
+                    </span>
+                {% else %}
+                    <span style="color: #666;">—</span>
+                {% endif %}
+            </td>
+            <td class="money {% if c.grand_total >= 0 %}positive{% else %}negative{% endif %}" style="font-weight: 600;">
+                ${{ "{:,.2f}".format(c.grand_total) }}
+                {% if c.unrealized_stock_pnl is not none %}
+                <div style="color: #888; font-weight: normal; font-size: 0.75rem;">
+                    R ${{ "{:,.0f}".format(c.realized_total) }} +
+                    U ${{ "{:,.0f}".format(c.unrealized_total) }}
+                </div>
+                {% endif %}
             </td>
             <td>
                 {% if c.status == 'CLOSED' %}

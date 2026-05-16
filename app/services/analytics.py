@@ -101,7 +101,21 @@ def _in_range(close_date: Optional[datetime], dr: DateRange) -> bool:
 
 @dataclass
 class OverallStats:
-    """Overall trading statistics."""
+    """Overall trading statistics.
+
+    P&L is reported with explicit realized / unrealized split:
+      - realized_pnl: cash already booked. Closed standalone positions
+        + closed wheel cycles. This is what the bank ledger says.
+      - unrealized_pnl: mark-to-market of currently held assets — shares
+        from active wheel cycles priced at the latest Yahoo close.
+        Open option positions are NOT marked here (the dashboard would
+        need ~N scraper calls; the risk page already shows their MTM).
+      - total_pnl: realized + unrealized.
+
+    The legacy `total_pnl` field now equals realized_pnl for backwards
+    compat (template variable name). UI should prefer the explicit
+    `realized_pnl` and `unrealized_pnl` fields.
+    """
     total_positions: int
     closed_positions: int
     open_positions: int
@@ -116,21 +130,36 @@ class OverallStats:
     short_calls: int
     long_puts: int
     long_calls: int
-    total_pnl: Decimal
-    options_pnl: Decimal  # P&L from options only (premium)
-    underlying_pnl: Decimal  # P&L from underlying stock (assignment/cover)
+    total_pnl: Decimal  # Realized + unrealized. Source of truth.
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    options_pnl: Decimal  # P&L from options only (premium) — realized
+    underlying_pnl: Decimal  # P&L from underlying stock — realized
     total_premium_collected: Decimal
     total_premium_paid: Decimal
     total_commissions: Decimal
     total_fees: Decimal
+    # Cycle-level breakouts for the wheel-aware UI.
+    active_cycle_count: int = 0
+    active_cycle_shares_held: int = 0
+    unrealized_priced_symbols: int = 0   # how many symbols got a live price
+    unrealized_missing_symbols: int = 0  # symbols where Yahoo failed
 
 
 @dataclass
 class SymbolStats:
-    """Per-symbol statistics."""
+    """Per-symbol statistics with realized / unrealized breakdown.
+
+    `pnl` is realized+unrealized (the total) for backward compatibility
+    with the existing chart. `realized` and `unrealized` allow the UI
+    to show a stacked bar so the user can see which symbols are
+    sitting on still-held wheel inventory.
+    """
     symbol: str
-    pnl: Decimal
-    num_positions: int
+    pnl: Decimal              # realized + unrealized
+    realized: Decimal
+    unrealized: Decimal
+    num_positions: int        # counted as cycles (1 per cycle) + standalone
     win_rate: float
 
 
@@ -161,6 +190,76 @@ class PositionDetail:
     total_pnl: Decimal  # Combined P&L
     is_winner: bool
     is_closed: bool
+
+
+@dataclass
+class _UnrealizedSnapshot:
+    """Mark-to-market summary for active wheel-cycle holdings.
+
+    Per-symbol so the per-symbol chart can stack realized + unrealized.
+    Aggregate values for the dashboard headline.
+    """
+    by_symbol: dict[str, Decimal]   # symbol -> unrealized P&L on still-held shares
+    by_symbol_shares: dict[str, int]
+    total: Decimal
+    symbols_priced: int
+    symbols_missing: int
+    total_shares_held: int
+    active_cycle_count: int
+
+
+async def compute_active_cycle_unrealized(db: AsyncSession) -> _UnrealizedSnapshot:
+    """Mark every active wheel cycle's currently-held shares to market.
+
+    Reads current prices from Yahoo (cheap, cached 60s). Symbols Yahoo
+    can't price are tallied as `symbols_missing` so the UI can warn —
+    we don't silently treat them as zero.
+
+    Aggregates by symbol so per-symbol bars can show a stacked
+    realized + unrealized breakdown.
+    """
+    from app.models import WheelCycle as _WC
+    from app.services.price_service import get_multiple_prices
+
+    active_stmt = select(_WC).where(
+        _WC.status == "ACTIVE", _WC.shares_held > 0
+    )
+    active = (await db.execute(active_stmt)).scalars().all()
+    if not active:
+        return _UnrealizedSnapshot({}, {}, Decimal(0), 0, 0, 0, 0)
+
+    symbols = sorted({c.symbol for c in active})
+    quotes = await get_multiple_prices(symbols)
+
+    by_symbol: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    by_shares: dict[str, int] = defaultdict(int)
+    total = Decimal(0)
+    priced = 0
+    missing = 0
+    total_shares = 0
+
+    for c in active:
+        total_shares += c.shares_held
+        by_shares[c.symbol] += c.shares_held
+        q = quotes.get(c.symbol)
+        if q is None or q.price is None:
+            missing += 1
+            continue
+        priced += 1
+        mark_value = Decimal(str(q.price))
+        unrealized = (mark_value - Decimal(c.avg_cost_basis)) * c.shares_held
+        by_symbol[c.symbol] += unrealized
+        total += unrealized
+
+    return _UnrealizedSnapshot(
+        by_symbol=dict(by_symbol),
+        by_symbol_shares=dict(by_shares),
+        total=total,
+        symbols_priced=priced,
+        symbols_missing=missing,
+        total_shares_held=total_shares,
+        active_cycle_count=len(active),
+    )
 
 
 async def get_overall_stats(
@@ -220,6 +319,19 @@ async def get_overall_stats(
     cycle_options_pnl = sum((c.options_pnl for c in closed_cycles), Decimal(0))
     cycle_stock_pnl = sum((c.stock_pnl for c in closed_cycles), Decimal(0))
 
+    # ACTIVE cycles also have REALIZED cash already banked — closed options'
+    # premiums and any partial stock sells. They're just not winners/losers
+    # yet (the cycle hasn't ended). Pulling these into realized_pnl is what
+    # lets the headline match "what's actually in the brokerage account".
+    active_cycles_all = [
+        c for c in (await db.execute(
+            select(WheelCycle).where(WheelCycle.status == "ACTIVE")
+        )).scalars().all()
+    ]
+    active_realized_total = sum((c.total_pnl for c in active_cycles_all), Decimal(0))
+    active_realized_options = sum((c.options_pnl for c in active_cycles_all), Decimal(0))
+    active_realized_stock = sum((c.stock_pnl for c in active_cycles_all), Decimal(0))
+
     decisive = (len(winners) + len(losers)) + (cycle_winners + cycle_losers)
     win_count = len(winners) + cycle_winners
     loss_count = len(losers) + cycle_losers
@@ -234,16 +346,37 @@ async def get_overall_stats(
     long_puts = len([p for p in positions if p.strategy == 'LONG PUT'])
     long_calls = len([p for p in positions if p.strategy == 'LONG CALL'])
 
-    # Calculate P&L components. Includes cycle P&L so the dashboard's
-    # Total / Options / Underlying buckets sum to your actual realised gain.
-    options_pnl = sum((p.net_pnl for p in closed), Decimal(0)) + cycle_options_pnl
-    underlying_pnl = sum((p.underlying_pnl for p in closed), Decimal(0)) + cycle_stock_pnl
-    total_pnl = sum((p.total_pnl for p in closed), Decimal(0)) + cycle_total_pnl
+    # Calculate REALIZED P&L. Includes:
+    #   - standalone closed positions (their total_pnl is already realized)
+    #   - closed wheel cycles (cycle.total_pnl = options + realized stock)
+    #   - active wheel cycles' realized portion (banked premiums + any
+    #     partial stock sells — cycle.total_pnl on ACTIVE rows is realized
+    #     only; unrealized MTM on held shares is computed separately)
+    options_pnl = (
+        sum((p.net_pnl for p in closed), Decimal(0))
+        + cycle_options_pnl + active_realized_options
+    )
+    underlying_pnl = (
+        sum((p.underlying_pnl for p in closed), Decimal(0))
+        + cycle_stock_pnl + active_realized_stock
+    )
+    total_pnl = (
+        sum((p.total_pnl for p in closed), Decimal(0))
+        + cycle_total_pnl + active_realized_total
+    )
 
     premium_collected = sum((p.total_premium for p in closed if p.total_premium > 0), Decimal(0))
     premium_paid = sum((p.total_premium for p in closed if p.total_premium < 0), Decimal(0))
     total_commissions = sum((p.total_commission for p in closed), Decimal(0))
     total_fees = sum((p.total_fees for p in closed), Decimal(0))
+
+    # Mark-to-market on active wheel cycles. Uses live Yahoo prices
+    # (cached 60s) so the dashboard reflects today's exposure on shares
+    # the user is still holding from put assignments.
+    unrealized = await compute_active_cycle_unrealized(db)
+
+    realized_pnl = total_pnl  # the variable we just computed IS realized only
+    grand_total = realized_pnl + unrealized.total
 
     return OverallStats(
         total_positions=len(positions),
@@ -261,13 +394,19 @@ async def get_overall_stats(
         short_calls=short_calls,
         long_puts=long_puts,
         long_calls=long_calls,
-        total_pnl=total_pnl,
+        total_pnl=grand_total,
+        realized_pnl=realized_pnl,
+        unrealized_pnl=unrealized.total,
         options_pnl=options_pnl,
         underlying_pnl=underlying_pnl,
         total_premium_collected=premium_collected,
         total_premium_paid=premium_paid,
         total_commissions=total_commissions,
-        total_fees=total_fees
+        total_fees=total_fees,
+        active_cycle_count=unrealized.active_cycle_count,
+        active_cycle_shares_held=unrealized.total_shares_held,
+        unrealized_priced_symbols=unrealized.symbols_priced,
+        unrealized_missing_symbols=unrealized.symbols_missing,
     )
 
 
@@ -275,33 +414,92 @@ async def get_pnl_by_symbol(
     db: AsyncSession,
     date_range: Optional[DateRange] = None,
 ) -> list[SymbolStats]:
-    """Get P&L breakdown by underlying symbol within the chosen window."""
+    """Per-symbol P&L breakdown.
+
+    Wheel-aware: positions in any wheel cycle are excluded from the
+    per-symbol position bucket; closed wheel cycles contribute their
+    `total_pnl` to their symbol (as one trade); active wheel cycles
+    contribute their MARKED-TO-MARKET unrealized P&L on still-held shares.
+
+    Each `SymbolStats` row exposes realized, unrealized, and the sum
+    so charts can stack them or pick one. Win-rate counts at the unit
+    level (each cycle = 1 trade, each standalone position = 1 trade).
+    """
+    from app.models import WheelCycle as _WC
+    from app.services.wheel_detection import position_ids_in_cycles
+
     dr = date_range or DateRange(None, None, "ALL")
+
     stmt = select(OptionPosition).options(selectinload(OptionPosition.contract)).where(
         OptionPosition.is_closed == True
     )
-    result = await db.execute(stmt)
-    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
+    wheel_pids = await position_ids_in_cycles(db)
+    standalone = [
+        p for p in (await db.execute(stmt)).scalars().all()
+        if _in_range(p.close_date, dr) and p.id not in wheel_pids
+    ]
 
-    symbol_data: dict[str, dict] = defaultdict(lambda: {'pnl': Decimal(0), 'count': 0, 'winners': 0})
+    # closed cycles within window
+    closed_cycles = [
+        c for c in (await db.execute(
+            select(_WC).where(_WC.status == "CLOSED")
+        )).scalars().all()
+        if _in_range(c.ended_at, dr)
+    ]
 
-    for p in positions:
-        symbol = p.contract.symbol
-        symbol_data[symbol]['pnl'] += p.total_pnl  # Use total_pnl (includes underlying); range already filtered above
-        symbol_data[symbol]['count'] += 1
+    unrealized = await compute_active_cycle_unrealized(db)
+
+    by_symbol: dict[str, dict] = defaultdict(
+        lambda: {
+            'realized': Decimal(0),
+            'unrealized': Decimal(0),
+            'count': 0,
+            'winners': 0,
+        }
+    )
+
+    for p in standalone:
+        d = by_symbol[p.contract.symbol]
+        d['realized'] += p.total_pnl
+        d['count'] += 1
         if p.total_pnl > 0:
-            symbol_data[symbol]['winners'] += 1
+            d['winners'] += 1
 
-    stats = []
-    for symbol, data in sorted(symbol_data.items(), key=lambda x: x[1]['pnl'], reverse=True):
+    for c in closed_cycles:
+        d = by_symbol[c.symbol]
+        d['realized'] += c.total_pnl
+        d['count'] += 1
+        if c.total_pnl > 0:
+            d['winners'] += 1
+
+    # Active cycles: their REALIZED portion (banked premiums + any partial
+    # sells) belongs in per-symbol realized P&L. They don't count toward
+    # win/loss yet (cycle hasn't ended).
+    active_cycles = (await db.execute(
+        select(_WC).where(_WC.status == "ACTIVE")
+    )).scalars().all()
+    for c in active_cycles:
+        d = by_symbol[c.symbol]
+        d['realized'] += c.total_pnl
+
+    # Unrealized — only matters for symbols with currently-held shares.
+    for sym, urpnl in unrealized.by_symbol.items():
+        by_symbol[sym]['unrealized'] += urpnl
+
+    stats: list[SymbolStats] = []
+    for symbol, data in by_symbol.items():
         win_rate = data['winners'] / data['count'] * 100 if data['count'] > 0 else 0
+        total = data['realized'] + data['unrealized']
         stats.append(SymbolStats(
             symbol=symbol,
-            pnl=data['pnl'],
+            pnl=total,
+            realized=data['realized'],
+            unrealized=data['unrealized'],
             num_positions=data['count'],
-            win_rate=win_rate
+            win_rate=win_rate,
         ))
-
+    # Sort by total P&L descending — same as before for chart consistency.
+    stats.sort(key=lambda s: s.pnl, reverse=True)
     return stats
 
 
@@ -309,28 +507,71 @@ async def get_monthly_pnl(
     db: AsyncSession,
     date_range: Optional[DateRange] = None,
 ) -> list[MonthlyStats]:
-    """Get P&L breakdown by month within the chosen window."""
-    dr = date_range or DateRange(None, None, "ALL")
-    stmt = select(OptionPosition).options(selectinload(OptionPosition.contract)).where(
-        OptionPosition.is_closed == True
-    ).order_by(OptionPosition.close_date)
-    result = await db.execute(stmt)
-    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
+    """Per-month REALIZED P&L event timeline.
 
-    # Explicit annotation so mypy can't think the dict values are `object`.
+    Three event streams merged:
+      1. Standalone (non-wheel) closed positions at close_date → total_pnl
+      2. Every closed option position (incl. wheel members) at close_date
+         → net_pnl (premium portion). Wheel members' underlying_pnl is
+         captured separately at cycle level so we don't double-count.
+      3. Closed wheel cycles at ended_at → stock_pnl (realized stock gain)
+
+    Active cycles' partial-sell stock gains are skipped (small approximation;
+    the cycle ends will reconcile them). Unrealized MTM is shown elsewhere.
+    """
+    from app.models import WheelCycle as _WC
+    from app.services.wheel_detection import position_ids_in_cycles
+
+    dr = date_range or DateRange(None, None, "ALL")
+    wheel_pids = await position_ids_in_cycles(db)
+
+    all_closed_positions = [
+        p for p in (await db.execute(
+            select(OptionPosition).options(selectinload(OptionPosition.contract))
+            .where(OptionPosition.is_closed == True)
+            .order_by(OptionPosition.close_date)
+        )).scalars().all()
+        if _in_range(p.close_date, dr)
+    ]
+
+    closed_cycles = [
+        c for c in (await db.execute(
+            select(_WC).where(_WC.status == "CLOSED")
+        )).scalars().all()
+        if _in_range(c.ended_at, dr)
+    ]
+
     monthly_data: dict[str, dict] = defaultdict(
         lambda: {'pnl': Decimal(0), 'trades': 0, 'winners': 0, 'losers': 0}
     )
 
-    for p in positions:
+    for p in all_closed_positions:
         if p.close_date:
-            month_key = p.close_date.strftime('%Y-%m')
-            monthly_data[month_key]['pnl'] += p.total_pnl  # Use total_pnl
-            monthly_data[month_key]['trades'] += 1
-            if p.total_pnl > 0:
-                monthly_data[month_key]['winners'] += 1
-            else:
-                monthly_data[month_key]['losers'] += 1
+            mk = p.close_date.strftime('%Y-%m')
+            # net_pnl = options premium only. For non-wheel positions
+            # net_pnl == total_pnl (no linked underlying). For wheel members,
+            # the underlying portion is captured by cycle.stock_pnl below.
+            monthly_data[mk]['pnl'] += p.net_pnl
+            if p.id not in wheel_pids:
+                # Win/loss counts only at the unit level (standalone or
+                # cycle). Wheel-member legs don't separately count.
+                monthly_data[mk]['trades'] += 1
+                if p.total_pnl > 0:
+                    monthly_data[mk]['winners'] += 1
+                elif p.total_pnl < 0:
+                    monthly_data[mk]['losers'] += 1
+
+    for c in closed_cycles:
+        if c.ended_at:
+            mk = c.ended_at.strftime('%Y-%m')
+            # Only the stock-realization portion at ended_at; the options
+            # premiums were already booked at each member's close_date.
+            monthly_data[mk]['pnl'] += c.stock_pnl
+            monthly_data[mk]['trades'] += 1
+            if c.total_pnl > 0:
+                monthly_data[mk]['winners'] += 1
+            elif c.total_pnl < 0:
+                monthly_data[mk]['losers'] += 1
 
     stats = []
     for month, data in sorted(monthly_data.items()):
@@ -349,27 +590,43 @@ async def get_cumulative_pnl(
     db: AsyncSession,
     date_range: Optional[DateRange] = None,
 ) -> list[tuple[datetime, Decimal]]:
-    """Get cumulative P&L over time for charting.
-
-    Cumulative resets to zero at the first closed position INSIDE the window —
-    we're answering "how did this window perform on its own", not "what's
-    your all-time running total truncated to a recent slice."
+    """Cumulative REALIZED P&L event timeline. Mirrors get_monthly_pnl's
+    event model: every option's premium booked at its close_date plus
+    each closed cycle's stock-realization at its ended_at. See that
+    function's docstring for the rationale on each stream.
     """
+    from app.models import WheelCycle as _WC
+
     dr = date_range or DateRange(None, None, "ALL")
-    stmt = select(OptionPosition).where(
-        OptionPosition.is_closed == True
-    ).order_by(OptionPosition.close_date)
-    result = await db.execute(stmt)
-    positions = [p for p in result.scalars().all() if _in_range(p.close_date, dr)]
 
-    cumulative = []
-    running_total = Decimal(0)
+    all_closed_positions = [
+        p for p in (await db.execute(
+            select(OptionPosition).where(OptionPosition.is_closed == True)
+        )).scalars().all()
+        if _in_range(p.close_date, dr)
+    ]
 
-    for p in positions:
+    closed_cycles = [
+        c for c in (await db.execute(
+            select(_WC).where(_WC.status == "CLOSED")
+        )).scalars().all()
+        if _in_range(c.ended_at, dr)
+    ]
+
+    events: list[tuple[datetime, Decimal]] = []
+    for p in all_closed_positions:
         if p.close_date:
-            running_total += p.total_pnl  # Use total_pnl
-            cumulative.append((p.close_date, running_total))
+            events.append((p.close_date, Decimal(p.net_pnl)))
+    for c in closed_cycles:
+        if c.ended_at:
+            events.append((c.ended_at, Decimal(c.stock_pnl)))
+    events.sort(key=lambda e: e[0])
 
+    cumulative: list[tuple[datetime, Decimal]] = []
+    running_total = Decimal(0)
+    for when, delta in events:
+        running_total += delta
+        cumulative.append((when, running_total))
     return cumulative
 
 

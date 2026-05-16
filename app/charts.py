@@ -124,44 +124,62 @@ def create_monthly_pnl_chart(data: list) -> tuple[str, str]:
 
 
 def create_symbol_pnl_chart(data: list, top_n: Optional[int] = 25) -> tuple[str, str]:
-    """Create P&L by symbol horizontal bar chart.
+    """Create P&L by symbol horizontal bar chart with realized + unrealized split.
 
-    `top_n` controls how many symbols are shown. With years of imported data
-    a hard cap of 10 hid most of the user's history, so the default is now
-    25 selected by |P&L| (biggest winners AND biggest losers, which is what
-    you usually want to see). Pass `top_n=None` to show every symbol.
+    Each symbol gets two stacked bars:
+      - Solid: realized P&L
+      - Lighter, outlined: unrealized MTM on still-held shares from
+        active wheel cycles
+    The total dominates sorting; hover shows the breakdown explicitly.
+
+    `top_n` controls how many symbols are shown, ranked by |total P&L|.
+    Pass `top_n=None` to show every symbol.
     """
     if not data:
         return create_empty_chart("P&L by Symbol", "No closed positions yet")
 
-    # Sort by absolute P&L so the chart surfaces biggest movers in either
-    # direction (the prior top-10-by-pnl hid all the big losers).
+    # Detect whether SymbolStats has the new realized/unrealized fields.
+    # Keep working when older callers pass simpler objects.
+    has_split = hasattr(data[0], 'realized') and hasattr(data[0], 'unrealized')
+
     sorted_data = sorted(data, key=lambda x: abs(float(x.pnl)), reverse=True)
     if top_n is not None:
         sorted_data = sorted_data[:top_n]
-    # Re-sort the displayed slice by signed P&L so the chart reads top→bottom
-    # from biggest winner to biggest loser.
     sorted_data = sorted(sorted_data, key=lambda x: float(x.pnl))
 
     symbols = [d.symbol for d in sorted_data]
     pnls = [float(d.pnl) for d in sorted_data]
-    colors = ["#22c55e" if v >= 0 else "#ef4444" for v in pnls]
+    realized = [float(getattr(d, 'realized', d.pnl)) for d in sorted_data]
+    unreal = [float(getattr(d, 'unrealized', 0)) for d in sorted_data]
+    realized_colors = ["#22c55e" if v >= 0 else "#ef4444" for v in realized]
+    unreal_colors = ["#3b82f6" if v >= 0 else "#f97316" for v in unreal]
 
+    # `unreal_right` is the absolute right-edge of the unrealized bar (= realized +
+    # unrealized). Bokeh needs this as a CDS column, not an inline list.
+    unreal_right = [r + u for r, u in zip(realized, unreal)]
     source = ColumnDataSource(data={
         'symbol': symbols,
         'pnl': pnls,
         'pnl_formatted': [f"${v:,.2f}" for v in pnls],
-        'color': colors,
+        'realized': realized,
+        'realized_fmt': [f"${v:,.2f}" for v in realized],
+        'unreal': unreal,
+        'unreal_fmt': [f"${v:,.2f}" for v in unreal],
+        'unreal_right': unreal_right,
+        'realized_color': realized_colors,
+        'unreal_color': unreal_colors,
         'positions': [d.num_positions for d in sorted_data],
-        'win_rate': [f"{d.win_rate:.1f}%" for d in sorted_data]
+        'win_rate': [f"{d.win_rate:.1f}%" for d in sorted_data],
     })
 
+    title_suffix = ""
+    if has_split and any(u != 0 for u in unreal):
+        title_suffix = " — realized (solid) + unrealized (faint)"
     title = (
-        f"P&L by Symbol (Top {top_n} by |P&L|)"
+        f"P&L by Symbol (Top {top_n} by |P&L|){title_suffix}"
         if top_n is not None and len(data) > top_n
-        else f"P&L by Symbol ({len(symbols)} symbols)"
+        else f"P&L by Symbol ({len(symbols)} symbols){title_suffix}"
     )
-    # Scale height so each bar gets a readable slot even at top_n=25+.
     bar_height = 24
     p = figure(
         title=title,
@@ -171,20 +189,36 @@ def create_symbol_pnl_chart(data: list, top_n: Optional[int] = 25) -> tuple[str,
         tools="pan,wheel_zoom,box_zoom,reset,save"
     )
 
-    p.hbar(y='symbol', right='pnl', source=source, height=0.7, color='color', alpha=0.8)
+    # Realized bar (solid).
+    p.hbar(y='symbol', right='realized', source=source, height=0.7,
+           color='realized_color', alpha=0.85, legend_label='Realized')
+    # Unrealized bar (lighter, stacked from realized so totals read off the end).
+    # We render this only when there's any unrealized; otherwise it'd just be a
+    # no-op line at zero that confuses the legend.
+    if has_split and any(u != 0 for u in unreal):
+        # Stack: starts at `realized` (CDS column), extends to
+        # `unreal_right` (also a CDS column = realized + unrealized).
+        p.hbar(y='symbol', left='realized', right='unreal_right',
+               source=source, height=0.6,
+               color='unreal_color', alpha=0.45, legend_label='Unrealized')
 
     # Zero line
     p.line([0, 0], [-0.5, len(symbols) - 0.5], line_dash='dashed', color='gray', alpha=0.5)
 
     hover = HoverTool(tooltips=[
         ("Symbol", "@symbol"),
-        ("P&L", "@pnl_formatted"),
+        ("Total", "@pnl_formatted"),
+        ("Realized", "@realized_fmt"),
+        ("Unrealized", "@unreal_fmt"),
         ("Positions", "@positions"),
-        ("Win Rate", "@win_rate")
+        ("Win Rate", "@win_rate"),
     ])
     p.add_tools(hover)
 
     p.xaxis.formatter = NumeralTickFormatter(format="$0,0")
+    p.legend.location = "bottom_right"
+    p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "8pt"
 
     _style_chart(p)
     return components(p)
