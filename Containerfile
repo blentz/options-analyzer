@@ -2,9 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for Playwright
+# Install system dependencies for Playwright + uv
 RUN apt-get update && apt-get install -y \
     wget \
+    curl \
+    ca-certificates \
     gnupg \
     libglib2.0-0 \
     libnss3 \
@@ -27,22 +29,34 @@ RUN apt-get update && apt-get install -y \
     libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install uv (fast Python package manager / venv tool)
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
-# Install Playwright Firefox browser
+# Create non-root runtime user. Playwright + Firefox happily run unprivileged
+# and there is no reason to expose the host root namespace to a scraper.
+RUN useradd --create-home --uid 1000 --shell /bin/bash app
+
+# Sync dependencies (production-only — no dev extras) into a venv at /app/.venv
+# owned by the app user.
+COPY --chown=app:app pyproject.toml uv.lock ./
+USER app
+ENV HOME=/home/app \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:${PATH}"
+RUN uv sync --frozen --no-dev
+
+# Install Playwright Firefox as the runtime user so its browser cache lives
+# in the user's home dir.
 RUN playwright install firefox
 
-# Copy application code
-COPY app/ ./app/
-COPY templates/ ./templates/
+USER root
+COPY --chown=app:app app/ ./app/
+COPY --chown=app:app templates/ ./templates/
+RUN mkdir -p /app/data /app/static /app/browser-profile \
+    && chown -R app:app /app
 
-# Create directories
-RUN mkdir -p /app/data /app/static /app/browser-profile
+USER app
 
-# Expose port
 EXPOSE 8000
 
-# Run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

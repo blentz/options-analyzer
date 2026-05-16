@@ -1,5 +1,6 @@
 """Risk analysis service for open options positions."""
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, date
@@ -10,7 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models import OptionPosition, OptionContract
+
+logger = logging.getLogger(__name__)
 
 
 # Constants for Black-Scholes calculations
@@ -18,8 +22,10 @@ from app.models import OptionPosition, OptionContract
 # Note: Some practitioners use 252 trading days, but calendar days is more common
 # for listed options since theta decays over weekends too.
 CALENDAR_DAYS_PER_YEAR = 365.0
-DEFAULT_RISK_FREE_RATE = 0.05
-DEFAULT_VOLATILITY = 0.30
+# These are now sourced from app.config.Settings so they can be overridden via
+# env vars (RISK_FREE_RATE, DEFAULT_VOLATILITY) without code changes.
+DEFAULT_RISK_FREE_RATE = settings.risk_free_rate
+DEFAULT_VOLATILITY = settings.default_volatility
 
 
 # Black-Scholes helper functions for option probability estimation
@@ -44,6 +50,59 @@ def _calculate_d1_d2(
     d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * volatility ** 2) * time_years) / (volatility * sqrt_t)
     d2 = d1 - volatility * sqrt_t
     return d1, d2
+
+
+def _norm_pdf(x: float) -> float:
+    """Standard normal probability density function."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def calculate_option_greeks(
+    option_type: str,
+    spot: float,
+    strike: float,
+    days_to_expiry: int,
+    volatility: float = DEFAULT_VOLATILITY,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> dict:
+    """Compute Black-Scholes Greeks for one option contract.
+
+    Returns delta, gamma, theta (per calendar day), vega (per 1% IV move).
+    All values are per-share; the caller multiplies by 100 * contracts and
+    by ±1 for short positions to get position Greeks.
+
+    Returns zeros at expiry or for invalid inputs rather than raising —
+    callers aggregate across many positions and a single bad one shouldn't
+    blow up the whole portfolio Greeks display.
+    """
+    if days_to_expiry <= 0 or spot <= 0 or strike <= 0 or volatility <= 0:
+        # Intrinsic only — delta is 1/-1 if ITM, else 0; other Greeks zero.
+        if option_type.upper() == "CALL":
+            return {"delta": 1.0 if spot > strike else 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        return {"delta": -1.0 if spot < strike else 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+    sqrt_T = math.sqrt(T)
+    try:
+        d1, d2 = _calculate_d1_d2(spot, strike, T, risk_free_rate, volatility)
+    except (ValueError, ZeroDivisionError):
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+    pdf_d1 = _norm_pdf(d1)
+    gamma = pdf_d1 / (spot * volatility * sqrt_T)
+    # Vega per 1% (not per 1 unit) — divide by 100 so callers can use whole-pct IV moves.
+    vega = spot * pdf_d1 * sqrt_T / 100.0
+
+    discount = math.exp(-risk_free_rate * T)
+    if option_type.upper() == "CALL":
+        delta = _norm_cdf(d1)
+        # Theta per YEAR; divide by 365 for per-day.
+        theta_year = -(spot * pdf_d1 * volatility) / (2 * sqrt_T) - risk_free_rate * strike * discount * _norm_cdf(d2)
+    else:
+        delta = _norm_cdf(d1) - 1.0
+        theta_year = -(spot * pdf_d1 * volatility) / (2 * sqrt_T) + risk_free_rate * strike * discount * _norm_cdf(-d2)
+    theta = theta_year / CALENDAR_DAYS_PER_YEAR
+    return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega}
 
 
 def calculate_option_price(
@@ -174,23 +233,32 @@ def _estimate_delta(
             return 1.0 if current_price > strike else 0.0
         else:
             return 1.0 if current_price < strike else 0.0
-    
+
     T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
-    
-    # Avoid log of zero or negative
-    if current_price <= 0 or strike <= 0:
+
+    # Avoid log of zero or negative — surface this rather than silently
+    # returning a coin-flip probability that looks like a real answer.
+    if current_price <= 0 or strike <= 0 or volatility <= 0:
+        logger.warning(
+            "_estimate_delta: invalid input S=%s K=%s vol=%s — cannot compute, returning 0.5",
+            current_price, strike, volatility,
+        )
         return 0.5
-    
+
     try:
         d1, d2 = _calculate_d1_d2(current_price, strike, T, risk_free_rate, volatility)
-        
+
         # Return approximate ITM probability using N(d2) for more accuracy
         # N(d2) is the risk-neutral probability of expiring ITM
         if option_type == "CALL":
             return _norm_cdf(d2)  # P(S_T > K) under risk-neutral measure
         else:  # PUT
             return _norm_cdf(-d2)  # P(S_T < K) = 1 - N(d2) = N(-d2)
-    except (ValueError, ZeroDivisionError):
+    except (ValueError, ZeroDivisionError) as e:
+        logger.warning(
+            "_estimate_delta: BS calc failed for %s K=%.2f S=%.2f dte=%d vol=%.4f: %s — returning 0.5",
+            option_type, strike, current_price, days_to_expiry, volatility, e,
+        )
         return 0.5
 
 
@@ -391,13 +459,11 @@ def calculate_max_risk(
             max_risk = (strike * multiplier) - premium_abs
             return (max(0, max_risk), False)
         else:  # SHORT CALL
-            # Unlimited risk - estimate based on 3x price move
-            # Use current price if available, otherwise use strike
-            reference_price = current_price if current_price else strike
-            # Assume stock could triple (conservative for risk display)
-            worst_case_price = reference_price * 3
-            max_risk = ((worst_case_price - strike) * multiplier) - premium_abs
-            return (max(0, max_risk), True)  # True = unlimited
+            # Naked short call has theoretically unlimited risk. Return inf
+            # rather than an arbitrary 3x estimate which gave users a false
+            # sense of a ceiling. Callers handle inf explicitly when scaling
+            # percent returns and when rendering "Unlimited" in the UI.
+            return (float('inf'), True)
     else:  # LONG positions
         # Max loss is premium paid
         return (premium_abs, False)
@@ -433,14 +499,38 @@ def generate_price_scenarios(
     premium: float,
     num_contracts: int,
     current_price: Optional[float] = None,
-    num_points: int = 21
+    num_points: int = 21,
+    volatility: float = DEFAULT_VOLATILITY,
+    days_to_expiry: int = 0,
 ) -> list[PriceScenario]:
-    """Generate P&L scenarios across a range of underlying prices."""
+    """Generate P&L scenarios across a realistic range of underlying prices.
+
+    Range selection:
+    - If current price + IV + dte are available, sweep ±3σ around the
+      current price using lognormal bounds (covers ~99.7% of expected paths).
+      This is dynamic: penny stocks get a tight window, high-vol names get a
+      wide one, low-dte positions a narrow one.
+    - Otherwise fall back to ±30% around the strike. The fixed window
+      previously used for all positions was meaningless for cheap stocks
+      (a $2 stock got a ±$0.60 window) and overkill for expensive ones
+      (an $800 stock got a ±$240 window).
+    """
     scenarios = []
 
-    # Generate price range: +/- 30% from strike
-    min_price = strike * 0.7
-    max_price = strike * 1.3
+    if current_price and current_price > 0 and volatility > 0 and days_to_expiry > 0:
+        T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+        drift = (DEFAULT_RISK_FREE_RATE - 0.5 * volatility ** 2) * T
+        bound = 3.0 * volatility * math.sqrt(T)
+        min_price = max(0.01, current_price * math.exp(drift - bound))
+        max_price = current_price * math.exp(drift + bound)
+        # Always include the strike inside the window — for very low-vol /
+        # very-short-dte positions the 3σ band can otherwise exclude the
+        # strike entirely and miss the payoff kink.
+        min_price = min(min_price, strike * 0.95)
+        max_price = max(max_price, strike * 1.05)
+    else:
+        min_price = strike * 0.7
+        max_price = strike * 1.3
     step = (max_price - min_price) / (num_points - 1)
 
     # Calculate max risk for percentage calculation
@@ -448,8 +538,8 @@ def generate_price_scenarios(
         option_type, strategy, strike, premium, num_contracts, current_price
     )
     
-    # If max_risk is 0 or very small, return None for percentages
-    use_percentages = max_risk > 0.01
+    # If max_risk is 0/tiny or infinite, percentage of risk is meaningless
+    use_percentages = max_risk > 0.01 and not math.isinf(max_risk)
 
     for i in range(num_points):
         price = min_price + (step * i)
@@ -528,17 +618,19 @@ def estimate_underlying_for_option_value(
     # Note: No division by 100 - delta is already per-share
     price_change_needed = value_change_needed / effective_delta
     estimated_price = current_price + price_change_needed
-    
+
     # Calculate confidence interval using lognormal distribution
     # Stock prices follow: S_T = S_0 * exp((r - σ²/2)T + σ√T * Z)
-    # 3σ bounds give ~99.7% confidence interval
+    # 3σ bounds give ~99.7% confidence interval.
+    # Center on the CURRENT price (the actual random walk starting point), not
+    # on the extrapolated estimate — otherwise we compound the delta-linear
+    # extrapolation error into the confidence band, doubly misleading the user.
     T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
     drift = (DEFAULT_RISK_FREE_RATE - 0.5 * volatility ** 2) * T
-    
-    # Apply lognormal bounds centered on the estimated price
-    lower_bound = estimated_price * math.exp(drift - 3.0 * volatility * math.sqrt(T))
-    upper_bound = estimated_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
-    
+
+    lower_bound = current_price * math.exp(drift - 3.0 * volatility * math.sqrt(T))
+    upper_bound = current_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
+
     return (max(0, estimated_price), max(0, lower_bound), max(0, upper_bound))
 
 
@@ -569,8 +661,8 @@ def generate_exit_scenarios(
         option_type, strategy, strike, premium, num_contracts, current_price
     )
     
-    # Ensure we have a valid denominator for percentages
-    use_percentages = max_risk > 0.01
+    # Ensure we have a valid denominator for percentages (also reject inf)
+    use_percentages = max_risk > 0.01 and not math.isinf(max_risk)
 
     # Scenario 1: Option expires worthless (OTM at expiration)
     if "SHORT" in strategy:
@@ -773,9 +865,9 @@ def calculate_close_scenario_with_probability(
     max_risk, _ = calculate_max_risk(
         option_type, strategy, strike, premium, num_contracts, current_price
     )
-    
-    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 else 0
-    
+
+    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 and not math.isinf(max_risk) else 0
+
     # Estimate underlying price where option would trade at close_price_per_share
     est_price, lower_bound, upper_bound = estimate_underlying_for_option_value(
         option_type=option_type,
@@ -847,9 +939,9 @@ def calculate_assignment_scenario_with_probability(
     max_risk, _ = calculate_max_risk(
         option_type, strategy, strike, premium, num_contracts, current_price
     )
-    
-    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 else 0
-    
+
+    pnl_percent = (pnl / max_risk) * 100 if max_risk > 0.01 and not math.isinf(max_risk) else 0
+
     # Assignment probability at this price (ITM probability)
     assignment_prob = _estimate_delta(option_type, strike, assignment_price, days_to_expiry, volatility=volatility)
     
@@ -903,9 +995,19 @@ async def analyze_open_position(
                         If None, falls back to DEFAULT_VOLATILITY (0.30)
     """
     contract = position.contract
-    
-    # Use live volatility if provided, otherwise default
-    volatility = live_volatility if live_volatility else DEFAULT_VOLATILITY
+
+    # Use live volatility if provided, otherwise default.
+    # The default is a flat 30% — wildly wrong for many tickers. Emit a clear
+    # log line so operators can spot when calculations are based on guess IV.
+    if live_volatility:
+        volatility = live_volatility
+    else:
+        volatility = DEFAULT_VOLATILITY
+        logger.warning(
+            "Using DEFAULT_VOLATILITY=%.2f for %s — live IV unavailable; "
+            "all probability/risk numbers for this position are approximate.",
+            DEFAULT_VOLATILITY, contract.contract_id,
+        )
 
     strike = float(contract.strike)
     option_type = contract.option_type
@@ -948,9 +1050,11 @@ async def analyze_open_position(
             max_profit = (strike * 100 * num_contracts) - premium_abs  # Long put max profit if stock goes to 0
         max_loss = premium_abs  # Max loss is premium paid
 
-    # Generate scenarios
+    # Generate scenarios using a dynamic range based on IV + DTE when we have
+    # them; otherwise the function falls back to ±30% from strike.
     scenarios = generate_price_scenarios(
-        option_type, strategy, strike, premium, num_contracts, current_price_for_risk
+        option_type, strategy, strike, premium, num_contracts, current_price_for_risk,
+        volatility=volatility, days_to_expiry=days_to_expiry,
     )
 
     # Current price data from quote
@@ -1150,8 +1254,142 @@ async def get_open_positions_analysis(db: AsyncSession) -> list[OpenPositionAnal
     return analyses
 
 
+@dataclass
+class StrategyGroupAnalysis:
+    """
+    Combined-payoff analysis for a group of positions that look like one
+    multi-leg strategy (spread, condor, butterfly, etc).
+
+    Fidelity exports list each leg as a separate trade, so the importer
+    persists every leg as its own OptionPosition. Without grouping, the
+    portfolio risk page sums the standalone max losses of each leg —
+    which double-counts capped spreads and wrongly shows "unlimited" for
+    legs that are actually defined by their wing.
+    """
+    group_key: str  # human-readable, e.g. "AAPL exp 2026-03-20"
+    symbol: str
+    expiration: date
+    days_to_expiry: int
+    position_ids: list[int]
+    leg_descriptions: list[str]  # e.g. ["SHORT PUT $90 x1", "LONG PUT $85 x1"]
+
+    # Aggregate metrics across all legs
+    net_premium: float        # net credit (+) or debit (−)
+    max_profit: float
+    max_loss: float           # finite if defined-risk; -inf-mapped-to-large if unbounded
+    breakeven_prices: list[float]
+    current_pnl: Optional[float]
+
+
+def _positions_to_legs(positions: list[OptionPosition]):
+    """Convert OptionPositions to OptionLegs for combined payoff math."""
+    from app.services.speculation_analysis import OptionLeg
+    legs = []
+    for pos in positions:
+        contract = pos.contract
+        action = "SELL" if "SHORT" in pos.strategy else "BUY"
+        qty = pos.num_contracts or 1
+        multiplier = 100 * qty
+        # premium per share, absolute value (OptionLeg handles signing via action)
+        premium_per_share = (
+            abs(float(pos.total_premium)) / multiplier if multiplier > 0 else 0.0
+        )
+        legs.append(OptionLeg(
+            option_type=contract.option_type,
+            strike=float(contract.strike),
+            expiration=contract.expiration,
+            action=action,
+            quantity=qty,
+            premium=premium_per_share,
+        ))
+    return legs
+
+
+def group_positions_for_strategy(
+    positions: list[OptionPosition]
+) -> list[list[OptionPosition]]:
+    """
+    Group OptionPositions that were likely opened together as one multi-leg
+    strategy. Heuristic: same symbol + same expiration + same calendar open
+    date. This catches spreads/condors/butterflies entered as a single order
+    without requiring schema changes.
+
+    Solo positions (groups of size 1) are also returned — callers can decide
+    whether to render them as a group or as a standalone leg.
+    """
+    from collections import defaultdict
+    buckets: dict[tuple, list[OptionPosition]] = defaultdict(list)
+    for p in positions:
+        key = (p.contract.symbol, p.contract.expiration, p.open_date.date())
+        buckets[key].append(p)
+    return list(buckets.values())
+
+
+def analyze_position_group(
+    positions: list[OptionPosition],
+    current_price: Optional[float],
+    volatility: float = DEFAULT_VOLATILITY,
+) -> StrategyGroupAnalysis:
+    """
+    Compute combined risk metrics for a group of positions treated as one
+    multi-leg strategy.
+    """
+    from app.services.speculation_analysis import (
+        calculate_max_profit_loss, find_breakeven_prices, calculate_strategy_pnl_at_price,
+    )
+
+    legs = _positions_to_legs(positions)
+    # Need a price anchor for the scenario sweep; if unknown, use mean strike.
+    anchor_price = current_price if current_price else (
+        sum(l.strike for l in legs) / len(legs) if legs else 0.0
+    )
+
+    if anchor_price <= 0:
+        # Can't analyze without a price. Return a stub.
+        return StrategyGroupAnalysis(
+            group_key=f"{positions[0].contract.symbol} exp {positions[0].contract.expiration}",
+            symbol=positions[0].contract.symbol,
+            expiration=positions[0].contract.expiration,
+            days_to_expiry=(positions[0].contract.expiration - date.today()).days,
+            position_ids=[p.id for p in positions],
+            leg_descriptions=[
+                f"{l.action} {l.option_type} ${l.strike} x{l.quantity}" for l in legs
+            ],
+            net_premium=0.0, max_profit=0.0, max_loss=0.0,
+            breakeven_prices=[], current_pnl=None,
+        )
+
+    max_profit, max_loss = calculate_max_profit_loss(legs, anchor_price)
+    breakevens = find_breakeven_prices(legs, anchor_price)
+    net_premium = sum(leg.total_premium for leg in legs)
+
+    current_pnl = (
+        calculate_strategy_pnl_at_price(legs, current_price)
+        if current_price is not None and current_price > 0 else None
+    )
+
+    contract0 = positions[0].contract
+    return StrategyGroupAnalysis(
+        group_key=f"{contract0.symbol} exp {contract0.expiration.strftime('%Y-%m-%d')}",
+        symbol=contract0.symbol,
+        expiration=contract0.expiration,
+        days_to_expiry=(contract0.expiration - date.today()).days,
+        position_ids=[p.id for p in positions],
+        leg_descriptions=[
+            f"{l.action} {l.option_type} ${l.strike} x{l.quantity}" for l in legs
+        ],
+        net_premium=round(net_premium, 2),
+        max_profit=round(max_profit, 2),
+        max_loss=round(max_loss, 2),
+        breakeven_prices=breakevens,
+        current_pnl=round(current_pnl, 2) if current_pnl is not None else None,
+    )
+
+
 async def get_portfolio_risk_summary(db: AsyncSession) -> dict:
     """Get aggregate risk metrics for all open positions."""
+    from app.services.price_service import get_multiple_prices
+
     analyses = await get_open_positions_analysis(db)
 
     if not analyses:
@@ -1163,8 +1401,56 @@ async def get_portfolio_risk_summary(db: AsyncSession) -> dict:
             "total_current_pnl": 0,
             "positions_expiring_soon": 0,
             "positions_itm": 0,
-            "analyses": []
+            "positions_using_default_iv": 0,
+            "portfolio_delta": 0.0,
+            "portfolio_gamma": 0.0,
+            "portfolio_theta": 0.0,
+            "portfolio_vega": 0.0,
+            "summary_generated_at": datetime.utcnow(),
+            "analyses": [],
+            "groups": [],
+            "total_max_loss_grouped": 0,
+            "total_max_profit_grouped": 0,
+            "any_group_unbounded": False,
         }
+
+    # Re-fetch raw positions to build groups (we already have analyses).
+    # Reusing analyses' parent positions avoids a second DB query.
+    from datetime import date as date_type
+    today = date_type.today()
+    stmt = select(OptionPosition).options(
+        selectinload(OptionPosition.contract)
+    ).where(OptionPosition.is_closed == False)
+    result = await db.execute(stmt)
+    raw_positions = [
+        p for p in result.scalars().all()
+        if p.strategy != "UNKNOWN" and p.contract.expiration >= today
+    ]
+    position_by_id = {p.id: p for p in raw_positions}
+
+    # Fetch live prices for grouping math (anchor for payoff sweep)
+    symbols = list({p.contract.symbol for p in raw_positions})
+    quotes = await get_multiple_prices(symbols)
+    price_by_symbol = {s: (q.price if q else None) for s, q in quotes.items()}
+
+    # Group positions and compute combined risk per group
+    groups_data = []
+    grouped_max_loss = 0.0
+    grouped_max_profit = 0.0
+    any_unbounded = False
+    for group in group_positions_for_strategy(raw_positions):
+        cur_price = price_by_symbol.get(group[0].contract.symbol)
+        group_analysis = analyze_position_group(group, cur_price)
+        groups_data.append(group_analysis)
+        # Aggregate, treating large abs values as unbounded markers
+        if abs(group_analysis.max_loss) > 1e8:
+            any_unbounded = True
+        else:
+            grouped_max_loss += group_analysis.max_loss
+        if abs(group_analysis.max_profit) > 1e8:
+            any_unbounded = True
+        else:
+            grouped_max_profit += group_analysis.max_profit
 
     total_premium = sum(a.premium_received for a in analyses)
     total_max_profit = sum(a.max_profit for a in analyses if a.max_profit < 999999)
@@ -1172,14 +1458,52 @@ async def get_portfolio_risk_summary(db: AsyncSession) -> dict:
     total_current_pnl = sum(a.current_pnl for a in analyses if a.current_pnl is not None)
     expiring_soon = sum(1 for a in analyses if a.days_to_expiry <= 7)
     positions_itm = sum(1 for a in analyses if a.itm is True)
+    positions_using_default_iv = sum(1 for a in analyses if a.iv_source == "default")
+
+    # Portfolio Greeks: sum the position-Greeks, sign-adjusted for shorts.
+    # delta is in shares-equivalent of underlying exposure; theta/vega in $/day
+    # and $/1%-IV-move respectively. These let you see directional, time-decay,
+    # and vol exposure at a glance.
+    portfolio_delta = 0.0
+    portfolio_gamma = 0.0
+    portfolio_theta = 0.0
+    portfolio_vega = 0.0
+    for a in analyses:
+        if a.current_price is None or a.days_to_expiry <= 0:
+            continue
+        vol_for_greeks = a.implied_volatility if a.implied_volatility else DEFAULT_VOLATILITY
+        g = calculate_option_greeks(
+            a.option_type, a.current_price, a.strike, a.days_to_expiry,
+            volatility=vol_for_greeks,
+        )
+        sign = -1.0 if "SHORT" in a.strategy else 1.0
+        multiplier = 100 * a.quantity * sign
+        portfolio_delta += g["delta"] * multiplier
+        portfolio_gamma += g["gamma"] * multiplier
+        portfolio_theta += g["theta"] * multiplier
+        portfolio_vega += g["vega"] * multiplier
 
     return {
         "total_positions": len(analyses),
         "total_premium": total_premium,
+        # Per-leg sums (kept for backwards compatibility — these can over/under
+        # state actual exposure when legs are part of a spread).
         "total_max_profit": total_max_profit,
         "total_max_loss": total_max_loss,
+        # Grouped totals are the trustworthy portfolio-wide numbers because
+        # they treat spread/condor legs as a single defined-risk unit.
+        "total_max_profit_grouped": grouped_max_profit,
+        "total_max_loss_grouped": grouped_max_loss,
+        "any_group_unbounded": any_unbounded,
         "total_current_pnl": total_current_pnl,
         "positions_expiring_soon": expiring_soon,
         "positions_itm": positions_itm,
-        "analyses": analyses
+        "positions_using_default_iv": positions_using_default_iv,
+        "portfolio_delta": round(portfolio_delta, 2),
+        "portfolio_gamma": round(portfolio_gamma, 4),
+        "portfolio_theta": round(portfolio_theta, 2),
+        "portfolio_vega": round(portfolio_vega, 2),
+        "summary_generated_at": datetime.utcnow(),
+        "analyses": analyses,
+        "groups": groups_data,
     }

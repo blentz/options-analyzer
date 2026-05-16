@@ -22,8 +22,22 @@ A web application for analyzing options trading performance from Fidelity accoun
 
 - **Backend**: Python 3.12, FastAPI, SQLAlchemy (async), aiosqlite
 - **Frontend**: Jinja2 templates, Bokeh charts
-- **Data**: SQLite database
+- **Data**: SQLite database (WAL mode, foreign keys ON)
 - **Deployment**: Podman container
+- **Dep management**: [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`)
+
+## Development
+
+```bash
+# Sync deps (creates .venv automatically)
+uv sync --extra dev
+
+# Run the app locally
+uv run uvicorn app.main:app --reload
+
+# Run tests
+uv run pytest
+```
 
 ## Running with Podman
 

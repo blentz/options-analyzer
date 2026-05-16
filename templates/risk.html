@@ -102,6 +102,26 @@
 
 <h1>Open Positions Risk Analysis</h1>
 
+{# Top-of-page banners: surface staleness and data-quality issues that
+   the old UI only hinted at via tiny per-position badges. #}
+{% if risk_summary.summary_generated_at %}
+<div style="margin-bottom: 0.75rem; color: #888; font-size: 0.8rem;">
+    Data as of <strong>{{ risk_summary.summary_generated_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</strong>
+    — prices and IV may be cached up to a few minutes.
+</div>
+{% endif %}
+
+{% if risk_summary.positions_using_default_iv and risk_summary.positions_using_default_iv > 0 %}
+<div style="margin-bottom: 1rem; padding: 0.75rem 1rem; background-color: #3b2020; border-left: 4px solid #ef4444; border-radius: 4px;">
+    <strong style="color: #ef4444;">⚠ Default IV in use</strong>
+    <div style="color: #ccc; font-size: 0.85rem; margin-top: 0.25rem;">
+        {{ risk_summary.positions_using_default_iv }} position(s) could not get live implied volatility from StockNear
+        and fell back to the default ({{ (settings.default_volatility * 100)|round|int if settings else 30 }}%).
+        Assignment probabilities, exit ranges, and Greeks for those positions are approximations only.
+    </div>
+</div>
+{% endif %}
+
 {% if risk_summary.total_positions == 0 %}
 <div class="alert" style="background-color: #252525; border: 1px solid #444; padding: 1.5rem; border-radius: 8px;">
     <p style="color: #888; margin: 0;">No open positions to analyze.</p>
@@ -127,12 +147,30 @@
         <div class="value positive">${{ "{:,.2f}".format(risk_summary.total_premium) }}</div>
     </div>
     <div class="stat-card">
-        <div class="label">Max Potential Profit</div>
-        <div class="value positive">${{ "{:,.2f}".format(risk_summary.total_max_profit) }}</div>
+        <div class="label">Max Profit (grouped)</div>
+        <div class="value positive">
+            {% if risk_summary.any_group_unbounded %}
+            Unlimited
+            {% else %}
+            ${{ "{:,.2f}".format(risk_summary.total_max_profit_grouped) }}
+            {% endif %}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Spreads counted as one unit
+        </div>
     </div>
     <div class="stat-card">
-        <div class="label">Max Potential Loss</div>
-        <div class="value negative">${{ "{:,.2f}".format(risk_summary.total_max_loss) }}</div>
+        <div class="label">Max Loss (grouped)</div>
+        <div class="value negative">
+            {% if risk_summary.any_group_unbounded %}
+            Unlimited
+            {% else %}
+            ${{ "{:,.2f}".format(risk_summary.total_max_loss_grouped) }}
+            {% endif %}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Defined-risk spreads capped at wing
+        </div>
     </div>
     <div class="stat-card">
         <div class="label">Positions ITM</div>
@@ -148,7 +186,119 @@
     </div>
 </div>
 
-<h2>Portfolio Risk Overview</h2>
+{# Portfolio-level Greeks. delta = directional exposure in shares-equivalent;
+   theta = $/day of expected time decay; vega = $ per 1% move in IV. #}
+<h2 style="margin-top: 2rem;">Portfolio Greeks</h2>
+<p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+    Aggregate Greeks across all open positions, sign-adjusted for short positions.
+    Computed with live IV where available — positions on default IV flagged above.
+</p>
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">Delta</div>
+        <div class="value {% if risk_summary.portfolio_delta > 0 %}positive{% elif risk_summary.portfolio_delta < 0 %}negative{% endif %}">
+            {{ "{:+,.0f}".format(risk_summary.portfolio_delta or 0) }}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Shares-equivalent directional exposure
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Gamma</div>
+        <div class="value">{{ "{:+,.2f}".format(risk_summary.portfolio_gamma or 0) }}</div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            ∂Δ / ∂S per dollar move
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Theta</div>
+        <div class="value {% if risk_summary.portfolio_theta > 0 %}positive{% else %}negative{% endif %}">
+            ${{ "{:+,.2f}".format(risk_summary.portfolio_theta or 0) }}
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Expected daily P&L from time decay
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Vega</div>
+        <div class="value">${{ "{:+,.2f}".format(risk_summary.portfolio_vega or 0) }}</div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            P&L per 1% IV move (portfolio-wide)
+        </div>
+    </div>
+</div>
+
+{# Detected multi-leg strategies (positions opened the same day on the same symbol+expiration). #}
+{% set multi_leg_groups = risk_summary.groups | selectattr('position_ids') | list %}
+{% set multi_leg_groups = multi_leg_groups | rejectattr('leg_descriptions', 'equalto', []) | list %}
+{% set spreads = [] %}
+{% for g in risk_summary.groups %}{% if g.position_ids|length > 1 %}{% set _ = spreads.append(g) %}{% endif %}{% endfor %}
+
+{% if spreads %}
+<h2 style="margin-top: 2rem;">Detected Multi-Leg Strategies</h2>
+<p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+    The importer creates one position per leg, so positions opened the same day
+    on the same symbol and expiration are treated here as a single spread/condor.
+    Max profit / max loss reflect the <em>combined</em> payoff — the per-leg
+    diagrams below still show each leg individually for diagnostic purposes.
+</p>
+<table>
+    <thead>
+        <tr>
+            <th>Symbol</th>
+            <th>Expiration</th>
+            <th>Days Left</th>
+            <th>Legs</th>
+            <th>Net Premium</th>
+            <th>Max Profit</th>
+            <th>Max Loss</th>
+            <th>Breakevens</th>
+            <th>Current P&L</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for g in spreads %}
+        <tr>
+            <td><strong>{{ g.symbol }}</strong></td>
+            <td>{{ g.expiration.strftime('%m/%d/%y') }}</td>
+            <td>
+                {% if g.days_to_expiry <= 7 %}
+                <span style="color: #f59e0b; font-weight: 600;">{{ g.days_to_expiry }}d</span>
+                {% else %}{{ g.days_to_expiry }}d{% endif %}
+            </td>
+            <td style="font-size: 0.85rem;">
+                {% for d in g.leg_descriptions %}
+                <div>{{ d }}</div>
+                {% endfor %}
+            </td>
+            <td class="money {% if g.net_premium >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "{:,.2f}".format(g.net_premium) }}
+            </td>
+            <td class="money positive">
+                {% if g.max_profit > 100000000 %}Unlimited{% else %}${{ "{:,.2f}".format(g.max_profit) }}{% endif %}
+            </td>
+            <td class="money negative">
+                {% if g.max_loss < -100000000 %}Unlimited{% else %}${{ "{:,.2f}".format(g.max_loss) }}{% endif %}
+            </td>
+            <td style="color: #a855f7; font-size: 0.85rem;">
+                {% if g.breakeven_prices %}
+                    {% for be in g.breakeven_prices %}${{ "{:.2f}".format(be) }}{% if not loop.last %}, {% endif %}{% endfor %}
+                {% else %}--{% endif %}
+            </td>
+            <td>
+                {% if g.current_pnl is not none %}
+                <span class="money {% if g.current_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    ${{ "{:,.2f}".format(g.current_pnl) }}
+                </span>
+                {% else %}<span style="color: #666;">--</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2 style="margin-top: 2rem;">Portfolio Risk Overview</h2>
 <p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
     Shows how each position's P&L changes with underlying price movement (% from strike).
     Click legend items to toggle visibility.

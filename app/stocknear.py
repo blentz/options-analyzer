@@ -42,10 +42,16 @@ class OptionContract:
     
     @property
     def mid_price(self) -> Optional[float]:
-        """Calculate mid price from bid/ask."""
-        if self.bid is not None and self.ask is not None:
+        """Mid of bid/ask, or None when both are unavailable.
+
+        Previously this silently fell back to `last`, which can be days old
+        for illiquid contracts. Callers that intentionally want last-trade
+        as a fallback should do so explicitly so the staleness is visible
+        in the call site rather than buried inside this property.
+        """
+        if self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > 0:
             return (self.bid + self.ask) / 2
-        return self.last
+        return None
 
 
 @dataclass
@@ -74,8 +80,38 @@ class ContractQuote:
     gamma: Optional[float] = None
     theta: Optional[float] = None
     vega: Optional[float] = None
-    
+
     raw_content: str = ""
+
+    @property
+    def spread_quality(self) -> str:
+        """
+        Classify the bid/ask spread so the UI can warn before users treat a
+        wide-spread `mid` as a real price. Categories:
+          - "tight"   : spread <= 5% of mid  (mid is meaningful)
+          - "moderate": 5% < spread <= 20%   (mid is approximate)
+          - "wide"    : 20% < spread <= 50%  (mid only a hint; expect slippage)
+          - "very_wide": spread > 50%        (mid is essentially fictional)
+          - "no_bid"  : bid is 0 or missing  (no real market)
+          - "no_quote": no bid AND no ask    (nothing to trade against)
+        """
+        if (self.bid is None or self.bid == 0) and (self.ask is None or self.ask == 0):
+            return "no_quote"
+        if self.bid is None or self.bid == 0:
+            return "no_bid"
+        if self.ask is None or self.ask == 0:
+            return "no_quote"
+        mid = (self.bid + self.ask) / 2
+        if mid <= 0:
+            return "no_quote"
+        spread_pct = (self.ask - self.bid) / mid
+        if spread_pct <= 0.05:
+            return "tight"
+        if spread_pct <= 0.20:
+            return "moderate"
+        if spread_pct <= 0.50:
+            return "wide"
+        return "very_wide"
 
 
 @dataclass
@@ -144,7 +180,14 @@ class StockData:
 
 
 def extract_browser_cookies(profile_path: str, domain_filter: str = "stocknear.com") -> list[dict]:
-    """Extract cookies from Firefox/LibreWolf cookies.sqlite for a specific domain."""
+    """Extract cookies from Firefox/LibreWolf cookies.sqlite for a specific domain.
+
+    The cookies file is opened by a running browser, so we copy it into a
+    private temporary directory before reading. Using TemporaryDirectory
+    (instead of a manual NamedTemporaryFile + unlink in finally) ensures the
+    copy is removed even if the process is killed between copy and cleanup —
+    the OS-managed cleanup runs on directory __exit__ unconditionally.
+    """
     cookies_db = Path(profile_path) / "cookies.sqlite"
 
     if not cookies_db.exists():
@@ -152,69 +195,65 @@ def extract_browser_cookies(profile_path: str, domain_filter: str = "stocknear.c
         return []
 
     logger.debug("Extracting cookies from %s for domain %s", cookies_db, domain_filter)
-    
-    # Copy the database to avoid locking issues with running browser
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite") as tmp:
-        shutil.copy(cookies_db, tmp.name)
-        tmp_path = tmp.name
 
-    try:
-        conn = sqlite3.connect(tmp_path)
-        cursor = conn.cursor()
+    cookies: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="cookies-") as tmpdir:
+        tmp_path = Path(tmpdir) / "cookies.sqlite"
+        # Restrict perms so other users on the host can't read it while alive
+        shutil.copy(cookies_db, tmp_path)
+        try:
+            tmp_path.chmod(0o600)
+        except Exception:
+            pass
 
-        # Firefox/LibreWolf cookie schema
-        cursor.execute("""
-            SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite
-            FROM moz_cookies
-            WHERE host LIKE ?
-        """, (f"%{domain_filter}%",))
+        conn = sqlite3.connect(str(tmp_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite
+                FROM moz_cookies
+                WHERE host LIKE ?
+                """,
+                (f"%{domain_filter}%",),
+            )
+            for row in cursor.fetchall():
+                name, value, host, path, expiry, is_secure, is_http_only, same_site = row
+                same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
+                cookie = {
+                    "name": name,
+                    "value": value,
+                    "domain": host,
+                    "path": path,
+                    "secure": bool(is_secure),
+                    "httpOnly": bool(is_http_only),
+                    "sameSite": same_site_map.get(same_site, "Lax"),
+                }
+                if expiry and expiry > 0:
+                    if expiry > 10000000000000:
+                        cookie["expires"] = expiry // 1000000
+                    elif expiry > 10000000000:
+                        cookie["expires"] = expiry // 1000
+                    else:
+                        cookie["expires"] = expiry
+                cookies.append(cookie)
+        finally:
+            conn.close()
 
-        cookies = []
-        for row in cursor.fetchall():
-            name, value, host, path, expiry, is_secure, is_http_only, same_site = row
-
-            # Map Firefox sameSite values to Playwright format
-            same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
-
-            cookie = {
-                "name": name,
-                "value": value,
-                "domain": host,
-                "path": path,
-                "secure": bool(is_secure),
-                "httpOnly": bool(is_http_only),
-                "sameSite": same_site_map.get(same_site, "Lax")
-            }
-            # Firefox stores expiry in seconds since epoch
-            if expiry and expiry > 0:
-                # Convert from microseconds to seconds if needed (13+ digits = ms/us)
-                if expiry > 10000000000000:  # More than 13 digits = microseconds
-                    cookie["expires"] = expiry // 1000000
-                elif expiry > 10000000000:  # 13 digits = milliseconds
-                    cookie["expires"] = expiry // 1000
-                else:
-                    cookie["expires"] = expiry
-
-            cookies.append(cookie)
-
-        conn.close()
-        logger.info("Extracted %d cookies for domain %s", len(cookies), domain_filter)
-        if cookies:
-            logger.debug("Cookie names: %s", [c["name"] for c in cookies])
-            # Log details of auth-related cookies
-            import time as time_module
-            now = time_module.time()
-            for c in cookies:
-                if c["name"] in ("pb_auth", "session", "auth", "token", "cf_clearance"):
-                    expires = c.get("expires", 0)
-                    is_expired = expires > 0 and expires < now
-                    logger.info(
-                        "Auth cookie '%s': domain=%s, expires=%s, expired=%s",
-                        c["name"], c["domain"], expires, is_expired
-                    )
-        return cookies
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    logger.info("Extracted %d cookies for domain %s", len(cookies), domain_filter)
+    if cookies:
+        # Don't log values; only metadata.
+        import time as time_module
+        now = time_module.time()
+        for c in cookies:
+            if c["name"] in ("pb_auth", "session", "auth", "token", "cf_clearance"):
+                expires = c.get("expires", 0)
+                is_expired = expires > 0 and expires < now
+                logger.info(
+                    "Auth cookie '%s': domain=%s, expires=%s, expired=%s",
+                    c["name"], c["domain"], expires, is_expired
+                )
+    return cookies
 
 
 class StockNearScraper:
@@ -556,15 +595,15 @@ class StockNearScraper:
         if iv_match:
             chain.implied_volatility = float(iv_match.group(1)) / 100
         
-        logger.debug("Chain IV data: iv=%s, rank=%s, pct=%s", 
+        logger.debug("Chain IV data: iv=%s, rank=%s, pct=%s",
                      chain.implied_volatility, chain.iv_rank, chain.iv_percentile)
-        
-        # Try to get current stock price from the page
-        # Usually appears early in the content
-        price_match = re.search(r'\$(\d+\.?\d*)', content)
-        if price_match:
-            chain.current_price = float(price_match.group(1))
-            logger.debug("Parsed current price: %s", chain.current_price)
+
+        # Do NOT scrape the underlying price from this page. The options page
+        # contains many dollar amounts (max pain, strikes, market cap, etc.) and
+        # the first $ match is unreliable — historically caused silent price
+        # corruption that propagated through every downstream calculation.
+        # Live price must come from a dedicated quote source (Yahoo Finance).
+        chain.current_price = None
         
         # Parse expiration table - format is tab-separated:
         # EXPIRATION\tCALL VOL\tPUT VOL\tP/C VOL\tCALL OI\tPUT OI\tP/C OI\tIMPLIED VOLATILITY\tMAX PAIN

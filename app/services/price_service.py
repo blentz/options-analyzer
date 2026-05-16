@@ -63,54 +63,69 @@ async def get_stock_price(symbol: str) -> Optional[StockQuote]:
     return quote
 
 
-async def _fetch_yahoo_quote(symbol: str) -> Optional[StockQuote]:
-    """Fetch quote from Yahoo Finance API."""
+async def _fetch_yahoo_quote(symbol: str, max_attempts: int = 3) -> Optional[StockQuote]:
+    """Fetch quote from Yahoo Finance API, retrying on transient failure.
+
+    Retries on 429 (rate limited), 503 (Yahoo blip), and network errors with
+    exponential backoff (0.5s, 1s, 2s). 4xx other than 429 are not retried
+    because they indicate a permanently bad request (e.g., unknown ticker).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {
-        "interval": "1d",
-        "range": "1d"
-    }
+    params = {"interval": "1d", "range": "1d"}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, params=params, headers=headers)
+    last_err: Optional[str] = None
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params, headers=headers)
 
-            if response.status_code != 200:
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data.get("chart", {}).get("result", [])
+                    if not result:
+                        return None
+                    meta = result[0].get("meta", {})
+                    price = meta.get("regularMarketPrice")
+                    prev_close = meta.get("previousClose", price)
+                    if price is None:
+                        return None
+                    change = price - prev_close if prev_close else 0
+                    change_percent = (change / prev_close * 100) if prev_close else 0
+                    return StockQuote(
+                        symbol=symbol.upper(),
+                        price=float(price),
+                        change=float(change),
+                        change_percent=float(change_percent),
+                        timestamp=datetime.now(),
+                    )
+
+                # Transient: retry
+                if response.status_code in (429, 503, 504):
+                    last_err = f"HTTP {response.status_code}"
+                    if attempt + 1 < max_attempts:
+                        await asyncio.sleep(0.5 * (2 ** attempt))
+                        continue
+                # Permanent failure
+                logger.warning("Yahoo returned %s for %s — giving up", response.status_code, symbol)
                 return None
 
-            data = response.json()
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError) as e:
+            last_err = str(e)
+            if attempt + 1 < max_attempts:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+        except Exception as e:
+            logger.exception("Unexpected error fetching Yahoo quote for %s: %s", symbol, e)
+            return None
 
-            # Parse Yahoo Finance response
-            result = data.get("chart", {}).get("result", [])
-            if not result:
-                return None
-
-            quote_data = result[0]
-            meta = quote_data.get("meta", {})
-
-            price = meta.get("regularMarketPrice")
-            prev_close = meta.get("previousClose", price)
-
-            if price is None:
-                return None
-
-            change = price - prev_close if prev_close else 0
-            change_percent = (change / prev_close * 100) if prev_close else 0
-
-            return StockQuote(
-                symbol=symbol.upper(),
-                price=float(price),
-                change=float(change),
-                change_percent=float(change_percent),
-                timestamp=datetime.now()
-            )
-
-    except Exception as e:
-        print(f"Error fetching price for {symbol}: {e}")
-        return None
+    logger.warning("All %d Yahoo attempts failed for %s (last error: %s)", max_attempts, symbol, last_err)
+    return None
 
 
 async def get_multiple_prices(symbols: list[str]) -> dict[str, Optional[StockQuote]]:

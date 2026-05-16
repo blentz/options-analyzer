@@ -104,11 +104,28 @@ curl http://localhost:8000/api/stats
 
 ## Dependencies
 
-Core dependencies in `requirements.txt`:
+Managed via `uv` — see `pyproject.toml` for the full pinned set, `uv.lock`
+for the resolved tree. Sync with `uv sync --extra dev`.
+
+Core dependencies:
 - `fastapi` + `uvicorn` - Web framework
-- `sqlalchemy` + `aiosqlite` - Async ORM
+- `sqlalchemy` + `aiosqlite` - Async ORM (SQLite with WAL mode)
 - `bokeh` - Interactive charts
 - `pandas` - Data manipulation
-- `httpx` - Async HTTP client (Yahoo Finance)
+- `httpx` - Async HTTP client (Yahoo Finance, with retry)
 - `jinja2` - Templates
 - `python-multipart` - File uploads
+- `playwright` - StockNear scraper (Firefox, persistent context)
+- `scipy` - Probability functions (norm.ppf)
+- `yfinance` - Options chains fallback
+
+Dev dependencies (`uv sync --extra dev`):
+- `pytest` + `pytest-asyncio` - Tests live in `tests/`
+
+## Running tests
+
+```bash
+uv run pytest          # all tests
+uv run pytest -v       # verbose
+uv run pytest tests/test_risk_math.py  # single file
+```

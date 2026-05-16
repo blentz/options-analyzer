@@ -2,11 +2,22 @@
 
 import csv
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from typing import Optional
 from dataclasses import dataclass
+
+
+# Number of days past expiration to wait before auto-marking an OPEN position
+# as EXPIRED. Brokers can take 1-3 business days to post assignment trades
+# after expiration weekend; if we flip outcome=EXPIRED immediately, a late-
+# arriving assignment trade either silently misses the underlying-linker
+# (because the position is already considered closed/expired) or flips
+# outcome=ASSIGNED at a time when downstream code may have already cached
+# the wrong state. 5 calendar days covers a Friday expiration plus the
+# following weekend and a settlement lag.
+AUTO_EXPIRY_GRACE_DAYS = 5
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -319,12 +330,22 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
     strategy = determine_strategy(trades, contract.option_type)
     outcome = determine_outcome(trades)
 
-    # Check if contract has expired (past expiration date)
-    contract_expired = contract.expiration < datetime.now().date()
-    if contract_expired and outcome == 'OPEN':
+    # Auto-EXPIRED only after a grace period. If the contract is past its
+    # expiration date but within the grace window, leave outcome=OPEN so a
+    # late-arriving assignment trade in a subsequent import can still flip
+    # the outcome to ASSIGNED and trigger underlying-trade linking. Without
+    # the grace period, we'd lock in EXPIRED on day 1 and any real assignment
+    # arriving on day 2-3 would silently mis-attribute P&L.
+    today = datetime.now().date()
+    contract_expired = contract.expiration < today
+    past_grace = contract.expiration < (today - timedelta(days=AUTO_EXPIRY_GRACE_DAYS))
+    if contract_expired and outcome == 'OPEN' and past_grace:
         outcome = 'EXPIRED'
 
-    # Position is closed if quantity is zero OR if it expired/was assigned
+    # Position is closed if quantity is zero OR if it expired/was assigned.
+    # During the grace window a quantity-still-open position stays is_closed=False
+    # so re-imports can amend it; the risk page already filters past-expiration
+    # positions out of risk display.
     is_closed = total_qty == 0 or outcome in ('EXPIRED', 'ASSIGNED')
 
     # Get or create position
@@ -344,15 +365,19 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
     else:
         close_date = None
     
-    # Calculate num_contracts: use max absolute quantity from opening trades
-    # This represents the largest position size held at any point.
-    # For ongoing analysis, this gives a conservative risk estimate.
-    opening_trades = [t for t in trades if 'OPENING' in t.action]
-    if opening_trades:
-        num_contracts = max(abs(t.quantity) for t in opening_trades)
-    else:
-        # Fallback to max of all trades if no explicit opening trades found
-        num_contracts = max(abs(t.quantity) for t in trades)
+    # Calculate num_contracts: largest absolute position size ever held.
+    # Walk the trades in date order, tracking running net quantity, and take
+    # the max absolute. This correctly accounts for scaling in/out (e.g.,
+    # sold 5 then sold 5 more should be 10, not max(5,5)=5). Fidelity sells
+    # are negative quantities and buys positive, so signed sums work directly.
+    # Trades are already ordered by trade_date from the query above.
+    running_qty = 0
+    max_abs_qty = 0
+    for t in trades:
+        running_qty += t.quantity
+        if abs(running_qty) > max_abs_qty:
+            max_abs_qty = abs(running_qty)
+    num_contracts = max_abs_qty if max_abs_qty > 0 else max(abs(t.quantity) for t in trades)
 
     if not position:
         position = OptionPosition(
@@ -403,17 +428,72 @@ async def underlying_trade_exists(db: AsyncSession, position_id: int, trade_date
     return result.scalar_one_or_none() is not None
 
 
+def _pick_position_for_underlying(
+    ut: ParsedUnderlyingTrade,
+    candidates: list[OptionPosition]
+) -> Optional[OptionPosition]:
+    """
+    Pick the best assigned-option position to attach an underlying trade to.
+
+    Order of disambiguation:
+    1. Direction: PUT assignment ⇒ user BOUGHT stock; CALL assignment ⇒ SOLD.
+       Drop candidates whose option type contradicts the trade direction so
+       we never attribute a put-assignment buy to a call-assignment leg on
+       the same symbol.
+    2. Strike vs trade price: assignments happen at the option's strike, so
+       among same-direction candidates the strike closest to the actual
+       per-share trade price is overwhelmingly likely to be the right one.
+       This catches the multi-strike same-symbol case (e.g., two short
+       AAPL puts at $90 and $95 — only one was assigned).
+    3. Expiration vs trade date: tertiary tiebreaker. Assignments usually
+       process within a day of expiration.
+    """
+    if not candidates:
+        return None
+
+    if ut.trade_type == 'ASSIGNMENT':
+        if ut.action == 'BUY':
+            matched = [p for p in candidates if p.contract.option_type == 'PUT']
+        else:  # SELL
+            matched = [p for p in candidates if p.contract.option_type == 'CALL']
+    else:
+        # Cover trades (manual buy/sell to flatten): match either direction
+        matched = list(candidates)
+
+    if not matched:
+        # No directional match; bail rather than attribute to the wrong leg
+        return None
+
+    if len(matched) == 1:
+        return matched[0]
+
+    trade_price = float(ut.price) if ut.price else 0.0
+
+    def _score(p: OptionPosition) -> tuple[float, int]:
+        strike_dist = abs(float(p.contract.strike) - trade_price) if trade_price > 0 else 0.0
+        exp_dist = abs((p.contract.expiration - ut.trade_date.date()).days)
+        # Sort by strike-distance first (primary), expiration-distance second.
+        return (strike_dist, exp_dist)
+
+    return min(matched, key=_score)
+
+
 async def link_underlying_trades(
     db: AsyncSession,
     underlying_trades: list[ParsedUnderlyingTrade],
-    assigned_positions: dict[str, OptionPosition]
+    assigned_positions: dict[str, list[OptionPosition]]
 ) -> int:
-    """Link underlying stock trades to their corresponding option positions."""
+    """Link underlying stock trades to their corresponding option positions.
+
+    `assigned_positions` is now a dict of symbol -> list of candidate positions
+    (one symbol can have multiple simultaneous assignments). The picker uses
+    trade direction + nearest expiration to choose the right one.
+    """
     linked_count = 0
 
     for ut in underlying_trades:
-        # Find a matching assigned position for this symbol
-        position = assigned_positions.get(ut.symbol)
+        candidates = assigned_positions.get(ut.symbol, [])
+        position = _pick_position_for_underlying(ut, candidates)
 
         if not position:
             continue
@@ -476,12 +556,14 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
 
     await db.flush()
 
-    # Update positions for affected contracts
-    assigned_positions = {}  # symbol -> position (for linking underlying trades)
+    # Update positions for affected contracts.
+    # Build symbol -> [positions] so the linker can pick by direction (PUT vs
+    # CALL) when multiple assignments exist on the same underlying.
+    assigned_positions: dict[str, list[OptionPosition]] = {}
     for contract in affected_contracts:
         position = await update_position(db, contract)
         if position and position.outcome == 'ASSIGNED':
-            assigned_positions[contract.symbol] = position
+            assigned_positions.setdefault(contract.symbol, []).append(position)
 
     # Also find any previously assigned positions for linking
     stmt = select(OptionPosition).options(
@@ -489,27 +571,28 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
     ).where(OptionPosition.outcome == 'ASSIGNED')
     result = await db.execute(stmt)
     for pos in result.scalars().all():
-        if pos.contract.symbol not in assigned_positions:
-            assigned_positions[pos.contract.symbol] = pos
+        bucket = assigned_positions.setdefault(pos.contract.symbol, [])
+        if pos not in bucket:
+            bucket.append(pos)
 
     # Link underlying trades to assigned positions
     if parsed_underlying and assigned_positions:
         linked = await link_underlying_trades(db, parsed_underlying, assigned_positions)
         imported += linked
 
-        # Update underlying P&L for affected positions
+        # Update underlying P&L for every potentially affected position
         await db.flush()
-        for symbol, position in assigned_positions.items():
-            # Reload position with underlying trades
-            stmt = select(OptionPosition).options(
-                selectinload(OptionPosition.underlying_trades)
-            ).where(OptionPosition.id == position.id)
-            result = await db.execute(stmt)
-            pos = result.scalar_one_or_none()
-            if pos:
-                underlying_pnl = sum(t.amount for t in pos.underlying_trades) if pos.underlying_trades else Decimal(0)
-                pos.underlying_pnl = underlying_pnl
-                pos.total_pnl = pos.net_pnl + underlying_pnl
+        for symbol, positions in assigned_positions.items():
+            for position in positions:
+                stmt = select(OptionPosition).options(
+                    selectinload(OptionPosition.underlying_trades)
+                ).where(OptionPosition.id == position.id)
+                result = await db.execute(stmt)
+                pos = result.scalar_one_or_none()
+                if pos:
+                    underlying_pnl = sum(t.amount for t in pos.underlying_trades) if pos.underlying_trades else Decimal(0)
+                    pos.underlying_pnl = underlying_pnl
+                    pos.total_pnl = pos.net_pnl + underlying_pnl
 
     # Log the import
     log = ImportLog(

@@ -28,6 +28,29 @@ class Settings(BaseSettings):
     
     # Price service
     price_cache_ttl_seconds: int = 60  # 1 minute cache for stock prices
+
+    # Risk math defaults. These drive every Black-Scholes-based calculation
+    # (assignment probability, BS option price for theta charts, exit
+    # scenario bands, etc). Override via env if your rate/vol assumptions
+    # differ — the 5% / 30% defaults are reasonable for SPY-like names but
+    # wrong for high-IV individual stocks and any non-near-zero-rate regime.
+    risk_free_rate: float = 0.05
+    default_volatility: float = 0.30
+
+    # Operational hardening
+    # Max CSV upload size in MB. Fidelity exports are typically <2MB; the cap
+    # exists to keep a malicious or accidental multi-GB upload from OOM'ing
+    # the container.
+    max_upload_mb: int = 25
+    # API key required on all routes when set. Leave empty to disable auth
+    # (only safe when bound to localhost on a trusted machine).
+    api_key: str = ""
+    # Debug endpoints (raw scraped content, screenshots, etc) leak internals
+    # and session data. Off by default — set to true only for local dev.
+    enable_debug_endpoints: bool = False
+    # Logging format: "text" (default, human-readable) or "json" (one JSON
+    # object per line for log aggregators).
+    log_format: str = "text"
     
     @property
     def database_url(self) -> str:

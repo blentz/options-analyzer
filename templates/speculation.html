@@ -799,11 +799,27 @@ const SpecApp = (function() {
             if (quote.mid !== null) html += `<span class="quote-mid">M:${quote.mid.toFixed(2)}</span> `;
             if (quote.ask !== null) html += `<span class="quote-ask">A:${quote.ask.toFixed(2)}</span>`;
             if (quote.last !== null && quote.bid === null) html += `<span class="quote-last">L:${quote.last.toFixed(2)}</span>`;
-            
+
             if (quote.implied_volatility !== null) {
                 html += `<br><span style="color: #666; font-size: 0.65rem;">IV:${(quote.implied_volatility * 100).toFixed(0)}%</span>`;
             }
-            
+
+            // Loud warning when the spread is wide enough that `mid` is fiction.
+            // Without this, users plug a meaningless mid into the analyzer and
+            // size positions against fake fair-value numbers.
+            const sq = quote.spread_quality;
+            if (sq === 'wide' || sq === 'very_wide' || sq === 'no_bid' || sq === 'no_quote') {
+                const labels = {
+                    'wide': 'WIDE SPREAD',
+                    'very_wide': 'VERY WIDE — MID UNRELIABLE',
+                    'no_bid': 'NO BID',
+                    'no_quote': 'NO QUOTE',
+                };
+                html += `<br><span style="color: #ef4444; font-size: 0.65rem; font-weight: 600;">⚠ ${labels[sq]}</span>`;
+            } else if (sq === 'moderate') {
+                html += `<br><span style="color: #f59e0b; font-size: 0.65rem;">~ wide-ish spread</span>`;
+            }
+
             quoteDiv.innerHTML = html || '<span style="color: #666;">No data</span>';
             
             // Auto-fill premium

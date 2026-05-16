@@ -3,7 +3,7 @@
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Integer, Numeric, DateTime, Date, ForeignKey, Index, Boolean
+from sqlalchemy import String, Integer, Numeric, DateTime, Date, ForeignKey, Index, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -83,6 +83,19 @@ class OptionPosition(Base):
     # Underlying stock P&L from assignment/exercise
     underlying_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     total_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)  # net_pnl + underlying_pnl
+
+    # Audit timestamps — track when the row was first written and last
+    # mutated. Particularly useful with the new auto-EXPIRED grace period:
+    # operators can see exactly when a position's outcome was changed by
+    # the importer vs. directly by a trade.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
 
     # Relationships
     contract: Mapped["OptionContract"] = relationship(back_populates="position")

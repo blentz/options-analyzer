@@ -628,10 +628,14 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
     scenarios = analysis.scenarios
     if not scenarios:
         return create_empty_chart(f"{analysis.symbol} Time Decay", "No scenario data")
-    
-    # Import Black-Scholes for option value estimation
-    from app.services.risk_analysis import _estimate_delta
-    
+
+    # Use the real Black-Scholes pricing function from risk_analysis.
+    # The previous implementation rolled its own approximation
+    # (0.4 * σ * S * √T * "moneyness factor") which was inaccurate away from
+    # the money and used ITM probability in place of delta. The proper BS
+    # routine is already in the codebase — just call it.
+    from app.services.risk_analysis import calculate_option_price
+
     prices = [s.underlying_price for s in scenarios]
     days_to_expiry = analysis.days_to_expiry
     strike = analysis.strike
@@ -640,7 +644,7 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
     premium = analysis.premium_received
     num_contracts = analysis.quantity
     multiplier = 100 * num_contracts
-    
+
     # Use live IV from analysis if available, otherwise default
     volatility = analysis.implied_volatility if analysis.implied_volatility else 0.30
     
@@ -670,58 +674,21 @@ def create_theta_decay_chart(analysis) -> tuple[str, str]:
         pnls = []
         
         for price in prices:
-            if dte == 0:
-                # At expiration, use intrinsic value
-                if option_type == "CALL":
-                    intrinsic = max(0, price - strike)
-                else:
-                    intrinsic = max(0, strike - price)
-                
-                if "SHORT" in strategy:
-                    pnl = premium - (intrinsic * multiplier)
-                else:
-                    pnl = (intrinsic * multiplier) - abs(premium)
+            # Theoretical option price per share at this underlying price and
+            # remaining days-to-expiry. calculate_option_price returns
+            # intrinsic when dte==0, so one branch handles both cases.
+            option_value_per_share = calculate_option_price(
+                option_type, price, strike, dte, volatility=volatility
+            )
+            estimated_option_value = option_value_per_share * multiplier
+
+            if "SHORT" in strategy:
+                # Collected premium, owe current option value
+                pnl = premium - estimated_option_value
             else:
-                # Before expiration, estimate option value using Black-Scholes approximation
-                # This uses a simplified time value decay model based on sqrt(time)
-                delta = _estimate_delta(option_type, strike, price, dte, volatility=volatility)
-                
-                if option_type == "CALL":
-                    intrinsic = max(0, price - strike)
-                else:
-                    intrinsic = max(0, strike - price)
-                
-                # Time value estimation using Black-Scholes-like decay
-                # Time value is approximately: S * σ * √T * pdf(d1) / √(2π)
-                # Simplified as: ATM_time_value * time_factor * delta_adjustment
-                T = dte / 365.0
-                sqrt_T = math.sqrt(T)
-                
-                # ATM time value approximation: 0.4 * σ * S * √T (from BS formula)
-                # This gives roughly correct ATM option values
-                atm_time_value = 0.4 * volatility * strike * sqrt_T
-                
-                # Adjust for moneyness using delta
-                # ATM options (delta ~ 0.5) have max time value
-                # Deep ITM/OTM options have less time value
-                if option_type == "CALL":
-                    moneyness_factor = 2 * delta * (1 - delta) * 2  # Peaks at delta=0.5
-                else:
-                    # For puts, delta from _estimate_delta is the ITM probability
-                    moneyness_factor = 2 * delta * (1 - delta) * 2
-                
-                # Clamp moneyness factor to reasonable range
-                moneyness_factor = max(0.1, min(1.0, moneyness_factor))
-                
-                time_value = atm_time_value * moneyness_factor
-                
-                estimated_option_value = (intrinsic + time_value) * multiplier
-                
-                if "SHORT" in strategy:
-                    pnl = premium - estimated_option_value
-                else:
-                    pnl = estimated_option_value - abs(premium)
-            
+                # Paid premium, own option (would receive its value on close)
+                pnl = estimated_option_value - abs(premium)
+
             pnls.append(pnl)
         
         color = colors[i % len(colors)]
@@ -909,9 +876,16 @@ def create_speculation_pnl_chart(analysis) -> tuple[str, str]:
 def create_speculation_theta_chart(analysis) -> tuple[str, str]:
     """
     Create a chart showing how P&L curves change over time (theta decay) for speculation.
+
+    Uses proper Black-Scholes pricing per leg and sums to get strategy P&L at
+    each (price, time-remaining) point. The previous implementation tried to
+    decay the strategy's NET PREMIUM by sqrt(time) and add it to intrinsic
+    P&L — which double-counted (intrinsic P&L already includes the credit/
+    debit) and was just incorrect for multi-leg strategies.
     """
     from app.services.speculation_analysis import calculate_strategy_pnl_at_price
-    
+    from app.services.risk_analysis import calculate_option_price
+
     scenarios = analysis.scenarios
     if not scenarios:
         return create_empty_chart(f"{analysis.symbol} Time Decay", "No scenario data")
@@ -919,7 +893,7 @@ def create_speculation_theta_chart(analysis) -> tuple[str, str]:
     prices = [s.underlying_price for s in scenarios]
     days_to_expiry = analysis.days_to_expiry
     legs = analysis.legs
-    
+
     # Use IV from analysis or default
     volatility = analysis.implied_volatility if analysis.implied_volatility else 0.30
 
@@ -945,39 +919,44 @@ def create_speculation_theta_chart(analysis) -> tuple[str, str]:
     # Colors for different time curves (lighter = further from expiry)
     colors = ["#60a5fa", "#3b82f6", "#2563eb", "#1d4ed8"]
 
+    from datetime import date as _date, timedelta as _timedelta
+
+    today = _date.today()
+
+    def _strategy_pnl_with_bs(legs_, price_, eval_dte_, vol_):
+        """Sum signed per-leg BS P&L using each leg's OWN remaining dte.
+
+        For calendar/diagonal spreads the legs have different expirations —
+        the short leg may already be at expiration (use intrinsic) while
+        the longer-dated leg still has time value. Computing one strategy-
+        wide dte would price both legs the same and produce a flat-wrong
+        payoff for any non-same-expiration strategy.
+        """
+        eval_date = today + _timedelta(days=eval_dte_)
+        total = 0.0
+        for leg in legs_:
+            leg_remaining = max(0, (leg.expiration - eval_date).days)
+            opt_val_per_share = calculate_option_price(
+                leg.option_type, price_, leg.strike, leg_remaining, volatility=vol_
+            )
+            multiplier = 100 * leg.quantity
+            if leg.is_short:
+                # Collected `premium`, owe current value
+                leg_pnl = (leg.premium - opt_val_per_share) * multiplier
+            else:
+                # Paid `premium`, would receive current value
+                leg_pnl = (opt_val_per_share - leg.premium) * multiplier
+            total += leg_pnl
+        return total
+
     for i, (label, dte) in enumerate(time_points):
         pnls = []
-
         for price in prices:
             if dte == 0:
-                # At expiration, use intrinsic value calculation
-                pnl = calculate_strategy_pnl_at_price(legs, price)
+                # Closed form at expiration (intrinsic only, matches existing math)
+                pnls.append(calculate_strategy_pnl_at_price(legs, price))
             else:
-                # Before expiration, estimate using time value decay
-                # This is a simplified model - multiply by sqrt(time_remaining/total_time)
-                intrinsic_pnl = calculate_strategy_pnl_at_price(legs, price)
-                
-                # Estimate time value decay factor
-                # At expiry, options are worth intrinsic only
-                # Before expiry, they have additional time value
-                time_factor = math.sqrt(dte / max(days_to_expiry, 1))
-                
-                # Net premium represents the maximum time value component
-                net_premium = analysis.net_premium
-                
-                # Time value decay affects short positions positively, long positions negatively
-                # For credit strategies (net_premium > 0): time decay helps
-                # For debit strategies (net_premium < 0): time decay hurts
-                time_value_remaining = abs(net_premium) * time_factor
-                
-                if net_premium > 0:
-                    # Credit: we've collected premium, owe intrinsic. Time value helps us.
-                    pnl = intrinsic_pnl + (abs(net_premium) - time_value_remaining)
-                else:
-                    # Debit: we've paid premium, receive intrinsic. Time value hurts us.
-                    pnl = intrinsic_pnl - (abs(net_premium) - time_value_remaining)
-
-            pnls.append(pnl)
+                pnls.append(_strategy_pnl_with_bs(legs, price, dte, volatility))
 
         color = colors[i % len(colors)]
         source = ColumnDataSource(data={

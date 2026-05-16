@@ -10,11 +10,101 @@ This service wraps the synchronous StockNear scraper and provides:
 import asyncio
 import json
 import logging
+import threading
+import time as _time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Callable
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
+
+
+# Serialize Playwright browser launches. Multiple concurrent calls to the
+# scraper (e.g., user has /risk open while making a calculate-exit request)
+# would each spawn a Firefox instance, contend on the LibreWolf cookies.sqlite
+# read, and fight for CPU/memory. A semaphore of 1 keeps everything serial;
+# raise the value if you've benchmarked your host with parallel browsers.
+_SCRAPER_CONCURRENCY = 1
+_scraper_semaphore = asyncio.Semaphore(_SCRAPER_CONCURRENCY)
+
+
+# Persistent Playwright scraper. Launching Firefox + injecting cookies costs
+# ~3-5s per call; that was paid on every single request to /risk and every
+# exit-calc click. We keep one StockNearScraper alive across requests and
+# auto-recycle it periodically to recover from gradual browser-state issues
+# (memory growth, cookie staleness, etc).
+_persistent_scraper = None              # type: ignore[assignment]
+_persistent_lock = threading.Lock()
+_persistent_started_at: float = 0.0
+_persistent_request_count: int = 0
+_PERSISTENT_MAX_AGE_SECONDS = 60 * 60       # 1 hour
+_PERSISTENT_MAX_REQUESTS = 200              # rotate after 200 calls
+
+
+def _get_or_start_persistent_scraper():
+    """Lazy-singleton accessor. Must be called from a thread (not async ctx).
+
+    Recycles the scraper when it's older than _PERSISTENT_MAX_AGE_SECONDS or
+    has served _PERSISTENT_MAX_REQUESTS calls — whichever comes first. This
+    keeps long-running processes from accumulating Firefox memory / stale
+    cookies indefinitely.
+    """
+    from app.stocknear import StockNearScraper
+    global _persistent_scraper, _persistent_started_at, _persistent_request_count
+
+    with _persistent_lock:
+        recycle = False
+        now = _time.time()
+        if _persistent_scraper is None:
+            recycle = True
+        elif now - _persistent_started_at > _PERSISTENT_MAX_AGE_SECONDS:
+            logger.info("Persistent scraper exceeded max age — recycling")
+            recycle = True
+        elif _persistent_request_count >= _PERSISTENT_MAX_REQUESTS:
+            logger.info("Persistent scraper hit max request count — recycling")
+            recycle = True
+
+        if recycle:
+            if _persistent_scraper is not None:
+                try:
+                    _persistent_scraper.close()
+                except Exception as e:
+                    logger.warning("Error closing old persistent scraper: %s", e)
+            _persistent_scraper = StockNearScraper()
+            _persistent_scraper.start()
+            _persistent_started_at = now
+            _persistent_request_count = 0
+
+        _persistent_request_count += 1
+        return _persistent_scraper
+
+
+def shutdown_persistent_scraper():
+    """Call from app shutdown hook to release the browser."""
+    global _persistent_scraper
+    with _persistent_lock:
+        if _persistent_scraper is not None:
+            try:
+                _persistent_scraper.close()
+            except Exception:
+                pass
+            _persistent_scraper = None
+
+
+async def run_scraper(sync_fn: Callable, *args, **kwargs):
+    """Run a synchronous scraper function in a thread, serialized by the
+    global scraper semaphore. All callers in this module should funnel through
+    this helper rather than calling asyncio.to_thread directly so that the
+    concurrency cap is enforced uniformly.
+
+    If `sync_fn` accepts a `scraper` keyword (introspection-style), we pass
+    the persistent singleton in. Older sync helpers that build their own
+    `with StockNearScraper():` context are unaffected — they just won't get
+    the persistent scraper, which is a perf regression rather than a
+    correctness one. New code should accept `scraper=`.
+    """
+    async with _scraper_semaphore:
+        return await asyncio.to_thread(sync_fn, *args, **kwargs)
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,24 +225,26 @@ async def cleanup_expired_cache(db: AsyncSession) -> int:
 
 
 def _fetch_options_overview_sync(symbol: str) -> dict:
-    """Synchronous fetch of options overview - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        data = scraper.get_options_overview(symbol)
-        return asdict(data)
+    """Synchronous fetch of options overview - runs in thread pool.
+
+    Uses the persistent browser context so a hot app doesn't pay the
+    3-5s Firefox launch cost on every call.
+    """
+    scraper = _get_or_start_persistent_scraper()
+    data = scraper.get_options_overview(symbol)
+    return asdict(data)
 
 
 def _fetch_max_pain_sync(symbol: str) -> dict:
-    """Synchronous fetch of max pain - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        data = scraper.get_max_pain(symbol)
-        return asdict(data)
+    scraper = _get_or_start_persistent_scraper()
+    data = scraper.get_max_pain(symbol)
+    return asdict(data)
 
 
 def _fetch_stock_overview_sync(symbol: str) -> dict:
-    """Synchronous fetch of stock overview - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        data = scraper.get_stock_overview(symbol)
-        return asdict(data)
+    scraper = _get_or_start_persistent_scraper()
+    data = scraper.get_stock_overview(symbol)
+    return asdict(data)
 
 
 async def get_options_overview(
@@ -193,7 +285,7 @@ async def get_options_overview(
     # Fetch fresh data in thread pool
     logger.info("Fetching fresh options overview for %s (force_refresh=%s, has_expired_cache=%s)", symbol, force_refresh, cached is not None)
     try:
-        fresh_dict = await asyncio.to_thread(_fetch_options_overview_sync, symbol)
+        fresh_dict = await run_scraper(_fetch_options_overview_sync, symbol)
         
         # Log what we got from the scraper
         fresh_iv = fresh_dict.get('implied_volatility')
@@ -257,7 +349,7 @@ async def get_max_pain(
     
     logger.info("Fetching fresh max pain for %s", symbol)
     try:
-        data_dict = await asyncio.to_thread(_fetch_max_pain_sync, symbol)
+        data_dict = await run_scraper(_fetch_max_pain_sync, symbol)
         await set_cached_data(db, cache_key, "max_pain", symbol, data_dict)
         logger.debug("Max pain for %s: %s", symbol, data_dict.get("max_pain"))
         return data_dict.get("max_pain")
@@ -288,7 +380,7 @@ async def get_stock_data(
     
     logger.info("Fetching fresh stock data for %s", symbol)
     try:
-        data_dict = await asyncio.to_thread(_fetch_stock_overview_sync, symbol)
+        data_dict = await run_scraper(_fetch_stock_overview_sync, symbol)
         await set_cached_data(db, cache_key, "stock_overview", symbol, data_dict)
         return StockData(**data_dict)
     except Exception as e:
@@ -367,42 +459,41 @@ async def get_live_iv_for_symbols(
 
 def _fetch_options_chain_sync(symbol: str) -> dict:
     """Synchronous fetch of options chain - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        chain = scraper.get_options_chain_parsed(symbol)
-        # Convert to dict for JSON serialization
-        return {
-            "symbol": chain.symbol,
-            "current_price": chain.current_price,
-            "expirations": chain.expirations,
-            "iv_rank": chain.iv_rank,
-            "iv_percentile": chain.iv_percentile,
-            "implied_volatility": chain.implied_volatility,
-            "contracts": [
-                {
-                    "strike": c.strike,
-                    "option_type": c.option_type,
-                    "expiration": c.expiration,
-                    "bid": c.bid,
-                    "ask": c.ask,
-                    "last": c.last,
-                    "volume": c.volume,
-                    "open_interest": c.open_interest,
-                    "implied_volatility": c.implied_volatility,
-                    "delta": c.delta,
-                    "gamma": c.gamma,
-                    "theta": c.theta,
-                    "vega": c.vega,
-                }
-                for c in chain.contracts
-            ],
-            "raw_content": chain.raw_content[:1000] if chain.raw_content else ""  # Truncate for storage
-        }
+    scraper = _get_or_start_persistent_scraper()
+    chain = scraper.get_options_chain_parsed(symbol)
+    return {
+        "symbol": chain.symbol,
+        "current_price": chain.current_price,
+        "expirations": chain.expirations,
+        "iv_rank": chain.iv_rank,
+        "iv_percentile": chain.iv_percentile,
+        "implied_volatility": chain.implied_volatility,
+        "contracts": [
+            {
+                "strike": c.strike,
+                "option_type": c.option_type,
+                "expiration": c.expiration,
+                "bid": c.bid,
+                "ask": c.ask,
+                "last": c.last,
+                "volume": c.volume,
+                "open_interest": c.open_interest,
+                "implied_volatility": c.implied_volatility,
+                "delta": c.delta,
+                "gamma": c.gamma,
+                "theta": c.theta,
+                "vega": c.vega,
+            }
+            for c in chain.contracts
+        ],
+        "raw_content": chain.raw_content[:1000] if chain.raw_content else "",
+    }
 
 
 def _fetch_expirations_sync(symbol: str) -> list[str]:
     """Synchronous fetch of available expirations - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        return scraper.get_available_expirations(symbol)
+    scraper = _get_or_start_persistent_scraper()
+    return scraper.get_available_expirations(symbol)
 
 
 async def get_options_chain(
@@ -448,7 +539,7 @@ async def get_options_chain(
     
     logger.info("Fetching fresh options chain for %s (force_refresh=%s, has_expired_cache=%s)", symbol, force_refresh, cached is not None)
     try:
-        fresh_dict = await asyncio.to_thread(_fetch_options_chain_sync, symbol)
+        fresh_dict = await run_scraper(_fetch_options_chain_sync, symbol)
         
         # Log what we got
         logger.debug(
@@ -535,7 +626,7 @@ async def get_available_expirations(
     
     logger.info("Fetching fresh expirations for %s", symbol)
     try:
-        expirations = await asyncio.to_thread(_fetch_expirations_sync, symbol)
+        expirations = await run_scraper(_fetch_expirations_sync, symbol)
         await set_cached_data(db, cache_key, "expirations", symbol, {"expirations": expirations})
         logger.debug("Got %d expirations for %s", len(expirations), symbol)
         return expirations
@@ -581,10 +672,12 @@ async def get_symbol_speculation_data(
     # Get options chain data (cached) - this has last-known price and option data
     chain = await get_options_chain(db, symbol, force_refresh)
     
-    # Fallback to chain's current price if Yahoo returned null
-    if current_price is None and chain and chain.current_price:
-        logger.info("Using chain price fallback for %s: %s", symbol, chain.current_price)
-        current_price = chain.current_price
+    # No silent fallback to scraped chain price — if Yahoo returns null the
+    # caller must surface the failure to the user. (Using regex on the options
+    # page text routinely produced bogus prices, e.g. picking up market-cap
+    # dollar amounts as the stock price.)
+    if current_price is None:
+        logger.warning("No live price for %s — Yahoo returned null", symbol)
     
     # Get options overview for IV data
     options_data = await get_options_overview(db, symbol, force_refresh)
@@ -653,52 +746,53 @@ async def get_available_strikes(
         - strikes: list[float] - All available strikes sorted
         - expirations: list[str] - Available expiration dates
     """
-    cache_key = f"strikes_{symbol.upper()}"
-    
-    # Check cache first
+    symbol = symbol.upper()
+    cache_key = f"strikes:{symbol}"
+
+    # Check cache first (uses the same StockNearCache schema as everything else)
     if not force_refresh:
         stmt = select(StockNearCache).where(StockNearCache.cache_key == cache_key)
-        cached = await db.execute(stmt)
-        cached_row = cached.scalar_one_or_none()
-        
+        cached_row = (await db.execute(stmt)).scalar_one_or_none()
+
         if cached_row and cached_row.expires_at > datetime.utcnow():
             logger.debug("Using cached strikes for %s", symbol)
             try:
-                return json.loads(cached_row.data)
-            except:
-                pass
-    
-    # Fetch fresh data
+                return json.loads(cached_row.data_json)
+            except Exception as e:
+                logger.warning("Cached strikes for %s unreadable, refetching: %s", symbol, e)
+
+    # Fetch fresh data using the persistent scraper
     def fetch_sync():
-        with StockNearScraper() as scraper:
-            return scraper.get_available_strikes(symbol)
-    
-    data = await asyncio.to_thread(fetch_sync)
-    
+        scraper = _get_or_start_persistent_scraper()
+        return scraper.get_available_strikes(symbol)
+
+    data = await run_scraper(fetch_sync)
+
     result = {
         "strikes": data.get("strikes", []),
         "expirations": data.get("expirations", []),
     }
-    
-    # Cache for 1 hour
+
+    # Cache for 1 hour using the canonical StockNearCache fields
     try:
-        # Delete old cache
         await db.execute(
             delete(StockNearCache).where(StockNearCache.cache_key == cache_key)
         )
-        
-        # Insert new cache
+        now = datetime.utcnow()
         cache_row = StockNearCache(
             cache_key=cache_key,
-            data=json.dumps(result),
-            expires_at=datetime.utcnow() + timedelta(hours=1)
+            data_type="strikes",
+            symbol=symbol,
+            data_json=json.dumps(result),
+            fetched_at=now,
+            expires_at=now + timedelta(hours=1),
         )
         db.add(cache_row)
         await db.commit()
         logger.debug("Cached strikes for %s (count=%d)", symbol, len(result["strikes"]))
     except Exception as e:
         logger.warning("Failed to cache strikes for %s: %s", symbol, e)
-    
+
     return result
 
 
@@ -729,39 +823,46 @@ async def get_contract_premium(
         )
         return None
     
+    # Explicit fallback chain: mid (best) → last (potentially stale).
+    # mid_price now returns None when there is no real bid/ask spread, so
+    # callers see the staleness rather than getting a silently last-trade.
     premium = contract.mid_price
+    if premium is None and contract.last is not None and contract.last > 0:
+        logger.warning(
+            "No bid/ask for %s %s $%s %s — using last-trade price (%s) which may be stale",
+            symbol, expiration, strike, option_type, contract.last
+        )
+        premium = contract.last
     logger.debug(
         "Found contract %s %s %s %s: premium=%s",
         symbol, expiration, strike, option_type, premium
     )
-    # Prefer mid-price, fall back to last
     return premium
 
 
 def _fetch_contract_quote_sync(symbol: str, expiration: str, strike: float, option_type: str) -> dict:
     """Synchronous fetch of contract quote using direct API - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        # Use the new API method - MUCH faster than browser scraping
-        quote = scraper.get_contract_quote_via_api(symbol, expiration, strike, option_type)
-        return {
-            "symbol": quote.symbol,
-            "strike": quote.strike,
-            "option_type": quote.option_type,
-            "expiration": quote.expiration,
-            "contract_id": quote.contract_id,
-            "bid": quote.bid,
-            "ask": quote.ask,
-            "mid": quote.mid,
-            "last": quote.last,
-            "open_price": quote.open_price,
-            "volume": quote.volume,
-            "open_interest": quote.open_interest,
-            "implied_volatility": quote.implied_volatility,
-            "delta": quote.delta,
-            "gamma": quote.gamma,
-            "theta": quote.theta,
-            "vega": quote.vega,
-        }
+    scraper = _get_or_start_persistent_scraper()
+    quote = scraper.get_contract_quote_via_api(symbol, expiration, strike, option_type)
+    return {
+        "symbol": quote.symbol,
+        "strike": quote.strike,
+        "option_type": quote.option_type,
+        "expiration": quote.expiration,
+        "contract_id": quote.contract_id,
+        "bid": quote.bid,
+        "ask": quote.ask,
+        "mid": quote.mid,
+        "last": quote.last,
+        "open_price": quote.open_price,
+        "volume": quote.volume,
+        "open_interest": quote.open_interest,
+        "implied_volatility": quote.implied_volatility,
+        "delta": quote.delta,
+        "gamma": quote.gamma,
+        "theta": quote.theta,
+        "vega": quote.vega,
+    }
 
 
 async def get_contract_quote(
@@ -808,7 +909,7 @@ async def get_contract_quote(
     )
     
     try:
-        quote_dict = await asyncio.to_thread(
+        quote_dict = await run_scraper(
             _fetch_contract_quote_sync, symbol, expiration, strike, option_type
         )
         
@@ -828,31 +929,30 @@ async def get_contract_quote(
 
 def _fetch_contract_quotes_batch_sync(contracts: list[dict]) -> list[dict]:
     """Synchronous batch fetch of contract quotes using direct API - runs in thread pool."""
-    with StockNearScraper() as scraper:
-        # Use the new API method - parallel fetching is MUCH faster
-        quotes = scraper.get_contract_quotes_via_api(contracts)
-        return [
-            {
-                "symbol": q.symbol,
-                "strike": q.strike,
-                "option_type": q.option_type,
-                "expiration": q.expiration,
-                "contract_id": q.contract_id,
-                "bid": q.bid,
-                "ask": q.ask,
-                "mid": q.mid,
-                "last": q.last,
-                "open_price": q.open_price,
-                "volume": q.volume,
-                "open_interest": q.open_interest,
-                "implied_volatility": q.implied_volatility,
-                "delta": q.delta,
-                "gamma": q.gamma,
-                "theta": q.theta,
-                "vega": q.vega,
-            }
-            for q in quotes
-        ]
+    scraper = _get_or_start_persistent_scraper()
+    quotes = scraper.get_contract_quotes_via_api(contracts)
+    return [
+        {
+            "symbol": q.symbol,
+            "strike": q.strike,
+            "option_type": q.option_type,
+            "expiration": q.expiration,
+            "contract_id": q.contract_id,
+            "bid": q.bid,
+            "ask": q.ask,
+            "mid": q.mid,
+            "last": q.last,
+            "open_price": q.open_price,
+            "volume": q.volume,
+            "open_interest": q.open_interest,
+            "implied_volatility": q.implied_volatility,
+            "delta": q.delta,
+            "gamma": q.gamma,
+            "theta": q.theta,
+            "vega": q.vega,
+        }
+        for q in quotes
+    ]
 
 
 async def get_contract_quotes_batch(
@@ -907,7 +1007,7 @@ async def get_contract_quotes_batch(
                    len(contracts_to_fetch), len(contracts))
         
         try:
-            fetched_dicts = await asyncio.to_thread(
+            fetched_dicts = await run_scraper(
                 _fetch_contract_quotes_batch_sync, contracts_to_fetch
             )
             

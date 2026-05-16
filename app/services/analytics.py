@@ -21,6 +21,7 @@ class OverallStats:
     open_positions: int
     winners: int
     losers: int
+    breakeven_count: int  # Closed positions with exactly $0 P&L (scratches)
     win_rate: float
     expired: int
     assigned: int
@@ -84,11 +85,13 @@ async def get_overall_stats(db: AsyncSession) -> OverallStats:
 
     closed = [p for p in positions if p.is_closed]
     open_positions = [p for p in positions if not p.is_closed]
-    # Use total_pnl for win/loss determination (includes underlying)
-    # Note: Positions with exactly $0 P&L are considered breakeven, not losses
+    # Use total_pnl for win/loss determination (includes underlying).
+    # Breakeven positions ($0 P&L) are neither wins nor losses, so they are
+    # excluded from BOTH numerator and denominator of win_rate below.
     winners = [p for p in closed if p.total_pnl > 0]
     losers = [p for p in closed if p.total_pnl < 0]
     breakeven = [p for p in closed if p.total_pnl == 0]
+    decisive = len(winners) + len(losers)
 
     expired = len([p for p in closed if p.outcome == 'EXPIRED'])
     assigned = len([p for p in closed if p.outcome == 'ASSIGNED'])
@@ -115,7 +118,8 @@ async def get_overall_stats(db: AsyncSession) -> OverallStats:
         open_positions=len(open_positions),
         winners=len(winners),
         losers=len(losers),
-        win_rate=len(winners) / len(closed) * 100 if closed else 0,
+        breakeven_count=len(breakeven),
+        win_rate=len(winners) / decisive * 100 if decisive else 0,
         expired=expired,
         assigned=assigned,
         closed_early=closed_early,

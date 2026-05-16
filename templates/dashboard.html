@@ -39,8 +39,15 @@
         <div class="value">{{ stats.open_positions }}</div>
     </div>
     <div class="stat-card">
-        <div class="label">Winners / Losers</div>
-        <div class="value">{{ stats.winners }} / {{ stats.losers }}</div>
+        <div class="label">W / L / BE</div>
+        <div class="value">
+            <span class="positive">{{ stats.winners }}</span> /
+            <span class="negative">{{ stats.losers }}</span> /
+            <span style="color: #888;">{{ stats.breakeven_count }}</span>
+        </div>
+        <div style="color: #666; font-size: 0.7rem; margin-top: 0.25rem;">
+            Breakevens excluded from win rate
+        </div>
     </div>
     <div class="stat-card">
         <div class="label">Total Commissions</div>

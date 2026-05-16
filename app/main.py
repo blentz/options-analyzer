@@ -6,19 +6,51 @@ from pathlib import Path
 
 from typing import List, Optional
 from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from app.config import settings as app_settings
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# Configure logging. When LOG_FORMAT=json is set we emit one JSON object
+# per line — easier to ingest into log aggregators (Loki/Cloudwatch/etc).
+import json as _json
+import os as _os
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        base = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            base["exc"] = self.formatException(record.exc_info)
+        return _json.dumps(base, default=str)
+
+
+_log_handler = logging.StreamHandler()
+if _os.environ.get("LOG_FORMAT", "text").lower() == "json":
+    _log_handler.setFormatter(_JsonFormatter())
+else:
+    _log_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+
+_root = logging.getLogger()
+_root.handlers.clear()
+_root.addHandler(_log_handler)
+_root.setLevel(logging.INFO)
+
 # Set debug level for our modules
 logging.getLogger("app.stocknear").setLevel(logging.DEBUG)
 logging.getLogger("app.services.stocknear_service").setLevel(logging.DEBUG)
@@ -55,9 +87,40 @@ from pydantic import BaseModel
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup."""
+    """Initialize database on startup; release persistent browser on shutdown."""
+    import asyncio as _asyncio
+    from app.services.stocknear_service import shutdown_persistent_scraper, cleanup_expired_cache
+    from app.database import async_session
+
     await init_db()
-    yield
+
+    # Hourly cache cleanup so the StockNearCache table doesn't grow forever.
+    async def _cache_janitor():
+        while True:
+            try:
+                async with async_session() as session:
+                    deleted = await cleanup_expired_cache(session)
+                    if deleted:
+                        logging.getLogger(__name__).info("Cache janitor pruned %d expired entries", deleted)
+            except Exception:
+                logging.getLogger(__name__).exception("Cache janitor iteration failed")
+            await _asyncio.sleep(3600)
+
+    janitor_task = _asyncio.create_task(_cache_janitor())
+
+    try:
+        yield
+    finally:
+        janitor_task.cancel()
+        try:
+            await janitor_task
+        except _asyncio.CancelledError:
+            pass
+        # Best-effort: drop the persistent Firefox so the container can exit.
+        try:
+            await _asyncio.to_thread(shutdown_persistent_scraper)
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -67,6 +130,70 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+# Paths that never require auth — health probes and static assets must work
+# even before the API key is sent. Everything else is protected when
+# APP_API_KEY is set in the environment.
+_OPEN_PATHS = ("/health", "/ready", "/static/")
+
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """If APP_API_KEY is set, require it on every request via either an
+    `X-API-Key` header or `?api_key=` query parameter. If unset, the app
+    runs open (the previous behaviour) — log this loudly at startup so the
+    operator knows.
+    """
+
+    def __init__(self, app, api_key: str):
+        super().__init__(app)
+        self.api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        if not self.api_key:
+            return await call_next(request)
+        path = request.url.path
+        if any(path == p or path.startswith(p) for p in _OPEN_PATHS):
+            return await call_next(request)
+        provided = request.headers.get("x-api-key") or request.query_params.get("api_key")
+        if provided != self.api_key:
+            return JSONResponse(
+                {"detail": "Unauthorized: missing or invalid API key"},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
+class DebugGateMiddleware(BaseHTTPMiddleware):
+    """Block all /api/debug/* routes unless ENABLE_DEBUG_ENDPOINTS=true.
+
+    Debug endpoints return raw scraped HTML, screenshots, and session-bound
+    page text. Disabled in production by default to prevent accidental data
+    leakage if the app is exposed beyond localhost.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/api/debug") and not app_settings.enable_debug_endpoints:
+            return JSONResponse(
+                {"detail": "Debug endpoints disabled. Set ENABLE_DEBUG_ENDPOINTS=true to enable."},
+                status_code=404,
+            )
+        return await call_next(request)
+
+
+# Order matters: debug gate first (cheap reject), then API key.
+app.add_middleware(APIKeyMiddleware, api_key=app_settings.api_key)
+app.add_middleware(DebugGateMiddleware)
+
+if not app_settings.api_key:
+    logging.getLogger(__name__).warning(
+        "APP_API_KEY is empty — server is running OPEN. Set api_key in .env "
+        "or bind the container to localhost only."
+    )
+if app_settings.enable_debug_endpoints:
+    logging.getLogger(__name__).warning(
+        "ENABLE_DEBUG_ENDPOINTS=true — /api/debug/* exposed (raw scraped data)."
+    )
+
 # Templates
 templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
@@ -75,6 +202,24 @@ templates = Jinja2Templates(directory=str(templates_dir))
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.get("/health")
+async def health():
+    """Liveness probe — process is up and accepting requests."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready(db: AsyncSession = Depends(get_db)):
+    """Readiness probe — DB is reachable. Used by orchestrators to decide
+    whether to route traffic to this instance."""
+    from sqlalchemy import text as _text
+    try:
+        await db.execute(_text("SELECT 1"))
+        return {"status": "ready"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"DB unreachable: {e}")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -144,6 +289,9 @@ async def import_csv_files(
     db: AsyncSession = Depends(get_db)
 ):
     """Handle multiple CSV file uploads and import."""
+    from app.config import settings as _settings
+    max_bytes = _settings.max_upload_mb * 1024 * 1024
+
     results = []
     total_imported = 0
     total_skipped = 0
@@ -162,6 +310,18 @@ async def import_csv_files(
 
         try:
             content = await file.read()
+            if len(content) > max_bytes:
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "error": (
+                        f"File exceeds {_settings.max_upload_mb}MB limit "
+                        f"(got {len(content)/(1024*1024):.1f}MB). "
+                        "Raise MAX_UPLOAD_MB if this is legitimate."
+                    ),
+                })
+                files_failed += 1
+                continue
             content_str = content.decode('utf-8-sig')
             imported, skipped = await import_csv(db, content_str, file.filename)
 
@@ -272,7 +432,8 @@ async def risk_analysis_page(request: Request, db: AsyncSession = Depends(get_db
         "combined_div": combined_div,
         "summary_script": summary_script,
         "summary_div": summary_div,
-        "position_charts": position_charts
+        "position_charts": position_charts,
+        "settings": app_settings,
     })
 
 
@@ -286,7 +447,28 @@ async def api_risk(db: AsyncSession = Depends(get_db)):
         "total_premium": risk_summary["total_premium"],
         "total_max_profit": risk_summary["total_max_profit"],
         "total_max_loss": risk_summary["total_max_loss"],
+        # Grouped totals (treat each spread/condor as one unit). These are
+        # the trustworthy portfolio-wide numbers; per-leg sums above can
+        # double-count or over-estimate naked risk on spread legs.
+        "total_max_profit_grouped": risk_summary.get("total_max_profit_grouped"),
+        "total_max_loss_grouped": risk_summary.get("total_max_loss_grouped"),
+        "any_group_unbounded": risk_summary.get("any_group_unbounded", False),
         "positions_expiring_soon": risk_summary["positions_expiring_soon"],
+        "groups": [
+            {
+                "symbol": g.symbol,
+                "expiration": g.expiration.isoformat(),
+                "days_to_expiry": g.days_to_expiry,
+                "position_ids": g.position_ids,
+                "leg_descriptions": g.leg_descriptions,
+                "net_premium": g.net_premium,
+                "max_profit": g.max_profit,
+                "max_loss": g.max_loss,
+                "breakeven_prices": g.breakeven_prices,
+                "current_pnl": g.current_pnl,
+            }
+            for g in risk_summary.get("groups", [])
+        ],
         "positions": [
             {
                 "contract": a.contract_id,
@@ -417,7 +599,27 @@ async def api_calculate_exit(
     # Fetch current price for probability calculations
     current_quote = await get_stock_price(symbol)
     current_price = current_quote.price if current_quote else None
-    
+
+    # Try to fetch a live contract quote — without it, close-scenario
+    # probability uses the OPENING premium as "current option price", which
+    # is wildly wrong once the position has moved. The previous behaviour
+    # was to silently use opening premium; we now prefer mid > last and
+    # report which source the calculation used.
+    current_option_price = premium_per_share
+    option_price_source = "premium_at_open"
+    try:
+        from app.services.stocknear_service import get_contract_quote
+        exp_str = contract.expiration.strftime("%b %d, %Y")
+        live_quote = await get_contract_quote(db, symbol, exp_str, strike, option_type)
+        if live_quote and live_quote.mid is not None and live_quote.mid > 0:
+            current_option_price = live_quote.mid
+            option_price_source = "stocknear_mid"
+        elif live_quote and live_quote.last is not None and live_quote.last > 0:
+            current_option_price = live_quote.last
+            option_price_source = "stocknear_last"
+    except Exception as e:
+        print(f"Warning: Could not fetch live option price for {contract_id}: {e}")
+
     response = {
         "contract_id": contract_id,
         "symbol": contract.symbol,
@@ -429,13 +631,15 @@ async def api_calculate_exit(
         "quantity": num_contracts,
         "days_to_expiry": days_to_expiry,
         "current_underlying_price": current_price,
+        "current_option_price": round(current_option_price, 4),
+        "option_price_source": option_price_source,
         "volatility_used": round(volatility * 100, 1),
         "volatility_source": iv_source
     }
-    
+
     if current_price is None:
         response["warning"] = "Could not fetch current price - probability calculations unavailable"
-    
+
     # Calculate close scenario if requested
     if close_price is not None and current_price is not None:
         close_result = calculate_close_scenario_with_probability(
@@ -447,7 +651,7 @@ async def api_calculate_exit(
             current_price=current_price,
             days_to_expiry=days_to_expiry,
             close_price_per_share=close_price,
-            current_option_price=premium_per_share,  # Using original premium as proxy
+            current_option_price=current_option_price,
             volatility=volatility
         )
         
@@ -464,18 +668,16 @@ async def api_calculate_exit(
         }
     elif close_price is not None:
         # Fallback without current price
-        from app.services.risk_analysis import calculate_close_pnl
+        import math as _math
+        from app.services.risk_analysis import calculate_close_pnl, calculate_max_risk
         close_pnl = calculate_close_pnl(strategy, premium, close_price, num_contracts)
-        if "SHORT" in strategy:
-            max_risk = strike * multiplier if option_type == "PUT" else premium * 10
-        else:
-            max_risk = abs(premium)
-        
+        max_risk, _ = calculate_max_risk(option_type, strategy, strike, premium, num_contracts, None)
+        denom_ok = max_risk and not _math.isinf(max_risk)
         response["close_scenario"] = {
             "close_price_per_share": close_price,
             "close_cost_total": close_price * multiplier,
             "pnl": round(close_pnl, 2),
-            "pnl_percent": round((close_pnl / max_risk) * 100, 2) if max_risk else 0,
+            "pnl_percent": round((close_pnl / max_risk) * 100, 2) if denom_ok else None,
             "description": f"{'Buy' if 'SHORT' in strategy else 'Sell'} to close at ${close_price:.2f}/share",
             "probability": None,
             "note": "Current price unavailable - probability not calculated"
@@ -507,22 +709,22 @@ async def api_calculate_exit(
         }
     elif assignment_price is not None:
         # Fallback without current price
-        from app.services.risk_analysis import calculate_option_pnl_at_expiry, _estimate_delta
+        import math as _math
+        from app.services.risk_analysis import (
+            calculate_option_pnl_at_expiry, _estimate_delta, calculate_max_risk
+        )
         assignment_pnl = calculate_option_pnl_at_expiry(
             option_type, strategy, strike, premium, assignment_price, num_contracts
         )
         assignment_prob = _estimate_delta(option_type, strike, assignment_price, days_to_expiry)
-        
-        if "SHORT" in strategy:
-            max_risk = strike * multiplier if option_type == "PUT" else premium * 10
-        else:
-            max_risk = abs(premium)
-        
+        max_risk, _ = calculate_max_risk(option_type, strategy, strike, premium, num_contracts, None)
+        denom_ok = max_risk and not _math.isinf(max_risk)
+
         response["assignment_scenario"] = {
             "underlying_price": assignment_price,
             "pnl": round(assignment_pnl, 2),
-            "pnl_percent": round((assignment_pnl / max_risk) * 100, 2) if max_risk else 0,
-            "assignment_probability": round(assignment_prob * 100, 1),
+            "pnl_percent": round((assignment_pnl / max_risk) * 100, 2) if denom_ok else None,
+            "assignment_probability": round(assignment_prob * 100, 1) if assignment_prob is not None else None,
             "description": f"Assignment at ${assignment_price:.2f}",
             "price_probability": None,
             "note": "Current price unavailable - price probability not calculated"
@@ -722,19 +924,23 @@ async def api_speculation_analyze(
     
     symbol = request.symbol.upper()
     
-    # Get current price - try Yahoo first, fall back to chain data
+    # Live underlying price MUST come from a quote source we trust.
+    # Chain-page scraping is too noisy to use as a fallback (it routinely
+    # picked up wrong dollar amounts and corrupted every downstream number).
     price_quote = await get_stock_price(symbol)
     current_price = price_quote.price if price_quote else None
-    
-    # Get options chain for price fallback
+
+    # Options chain (still useful for IV/expirations even though we don't trust its price)
     chain = await get_options_chain(db, symbol)
-    
-    # Fallback to chain price if Yahoo returned null
-    if current_price is None and chain and chain.current_price:
-        current_price = chain.current_price
-    
+
     if current_price is None:
-        raise HTTPException(status_code=400, detail=f"Could not get price for {symbol}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not get live price for {symbol}. Yahoo Finance returned "
+                "no quote. Refusing to analyze with a stale/unknown price."
+            ),
+        )
     
     # Build OptionLeg objects using premiums provided by frontend
     legs = []
@@ -841,17 +1047,22 @@ async def api_speculation_analyze(
                 leg.option_type, leg.strike, days_to_exp, target_delta=0.5, volatility=iv
             )
         
-        # Calculate per-leg breakeven
-        if leg.is_short:
-            if leg.option_type == "PUT":
-                breakeven = leg.strike - leg.premium
+        # Per-leg breakeven is only meaningful for single-leg strategies.
+        # For spreads/condors/butterflies, the leg's breakeven is not a
+        # tradeable exit — only the strategy's aggregate breakevens are.
+        if len(legs) == 1:
+            if leg.is_short:
+                if leg.option_type == "PUT":
+                    breakeven = leg.strike - leg.premium
+                else:
+                    breakeven = leg.strike + leg.premium
             else:
-                breakeven = leg.strike + leg.premium
+                if leg.option_type == "CALL":
+                    breakeven = leg.strike + leg.premium
+                else:
+                    breakeven = leg.strike - leg.premium
         else:
-            if leg.option_type == "CALL":
-                breakeven = leg.strike + leg.premium
-            else:
-                breakeven = leg.strike - leg.premium
+            breakeven = None
         
         legs_data.append({
             "option_type": leg.option_type,
@@ -866,7 +1077,7 @@ async def api_speculation_analyze(
             "distance_to_strike_pct": round(distance_pct, 1),
             "assignment_probability": round(assignment_prob, 1) if assignment_prob is not None else None,
             "price_at_50pct_assignment": round(price_at_50pct, 2) if price_at_50pct else None,
-            "breakeven": round(breakeven, 2),
+            "breakeven": round(breakeven, 2) if breakeven is not None else None,
             "days_to_expiry": days_to_exp,
         })
     
@@ -958,11 +1169,13 @@ async def api_speculation_calculate_exit(
     
     # Calculate close scenario if requested
     if close_price is not None:
+        # total_premium is already correctly signed: positive for short (received),
+        # negative for long (paid). calculate_close_pnl expects signed premium.
         close_result = calculate_close_scenario_with_probability(
             option_type=option_type,
             strategy=strategy,
             strike=strike,
-            premium=total_premium if action == "SELL" else -total_premium,
+            premium=total_premium,
             num_contracts=quantity,
             current_price=current_price,
             days_to_expiry=days_to_expiry,
@@ -989,7 +1202,7 @@ async def api_speculation_calculate_exit(
             option_type=option_type,
             strategy=strategy,
             strike=strike,
-            premium=total_premium if action == "SELL" else -total_premium,
+            premium=total_premium,
             num_contracts=quantity,
             current_price=current_price,
             days_to_expiry=days_to_expiry,
@@ -1070,6 +1283,7 @@ async def api_speculation_contract_quote(
         "gamma": quote.gamma,
         "theta": quote.theta,
         "vega": quote.vega,
+        "spread_quality": quote.spread_quality,
     }
 
 
@@ -1152,6 +1366,7 @@ async def api_speculation_quotes_batch(
                 "implied_volatility": q.implied_volatility,
                 "delta": q.delta,
                 "theta": q.theta,
+                "spread_quality": q.spread_quality,
             }
             for q in quotes
         ]
@@ -1188,7 +1403,8 @@ async def debug_stocknear(symbol: str, db: AsyncSession = Depends(get_db)):
                 "chain_length": len(chain_content),
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1374,7 +1590,8 @@ async def debug_stocknear_api(
                 "screenshot_path": screenshot_path
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1496,7 +1713,8 @@ async def debug_contract_js(
                 "screenshot_path": screenshot_path
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1576,7 +1794,8 @@ async def debug_contract(
                 "next_data_preview": next_data_preview
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1656,7 +1875,8 @@ async def debug_quote_method(
                 "raw_content_sample": quote.raw_content[:2000] if quote.raw_content else None
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1725,7 +1945,8 @@ async def debug_oi(
                 "screenshot_path": screenshot_path
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1799,7 +2020,8 @@ async def debug_greeks(
                 "screenshot_path": screenshot_path
             }
     
-    result = await asyncio.to_thread(scrape_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(scrape_sync)
     return result
 
 
@@ -1873,7 +2095,8 @@ async def debug_quote_api(
                 "raw_content_preview": quote.raw_content[:500] if quote.raw_content else None
             }
     
-    result = await asyncio.to_thread(fetch_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(fetch_sync)
     return result
 
 
@@ -1900,7 +2123,8 @@ async def debug_strikes(symbol: str, raw_html: bool = False):
                 "debug_info": result.get("_debug", {})
             }
     
-    result = await asyncio.to_thread(fetch_sync)
+    from app.services.stocknear_service import run_scraper
+    result = await run_scraper(fetch_sync)
     return result
 
 

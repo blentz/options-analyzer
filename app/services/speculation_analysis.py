@@ -286,25 +286,51 @@ def find_breakeven_prices(
     legs: list[OptionLeg],
     current_price: float
 ) -> list[float]:
-    """Find prices where P&L crosses zero."""
-    scenarios = generate_strategy_scenarios(legs, current_price, num_points=200)
-    
-    breakevens = []
-    for i in range(1, len(scenarios)):
-        prev_pnl = scenarios[i-1].pnl
-        curr_pnl = scenarios[i].pnl
-        
-        # Check for sign change
-        if (prev_pnl < 0 and curr_pnl >= 0) or (prev_pnl >= 0 and curr_pnl < 0):
-            # Linear interpolation to find exact breakeven
-            if curr_pnl != prev_pnl:
-                ratio = abs(prev_pnl) / abs(curr_pnl - prev_pnl)
-                breakeven = scenarios[i-1].underlying_price + ratio * (
-                    scenarios[i].underlying_price - scenarios[i-1].underlying_price
-                )
-                breakevens.append(round(breakeven, 2))
-    
-    return breakevens
+    """
+    Find prices where the strategy P&L crosses zero — EXACTLY.
+
+    Option payoffs at expiration are piecewise linear: the only kinks are at
+    strike prices. Between any two adjacent strikes the strategy P&L is a
+    straight line, so any zero crossing in that interval can be solved
+    analytically. This is both faster and infinitely more precise than the
+    previous "sample 200 points and linearly interpolate" approach.
+    """
+    if not legs:
+        return []
+
+    # Key prices = all strikes plus a tiny epsilon below the lowest and a
+    # generous range above the highest, so we capture far-OTM crossings too.
+    strikes = sorted({float(leg.strike) for leg in legs})
+    far_low = max(0.01, strikes[0] * 0.5)
+    far_high = max(strikes[-1] * 2.0, (current_price or strikes[-1]) * 2.0)
+    key_prices = [far_low] + strikes + [far_high]
+
+    # Evaluate at each kink. Between consecutive kinks the function is linear.
+    pnls = [(p, calculate_strategy_pnl_at_price(legs, p)) for p in key_prices]
+
+    breakevens: list[float] = []
+    for (p1, v1), (p2, v2) in zip(pnls, pnls[1:]):
+        # Exact zero at a kink — record once.
+        if v1 == 0:
+            breakevens.append(round(p1, 4))
+            continue
+        # Sign change between kinks ⇒ unique zero crossing on a line segment.
+        if v1 * v2 < 0:
+            be = p1 + (-v1 / (v2 - v1)) * (p2 - p1)
+            breakevens.append(round(be, 4))
+    # Handle the case where the last kink itself is exactly zero
+    last_p, last_v = pnls[-1]
+    if last_v == 0:
+        breakevens.append(round(last_p, 4))
+
+    # Dedupe while preserving order (kinks can be exact zeros that the
+    # interval check would otherwise repeat).
+    seen, deduped = set(), []
+    for be in breakevens:
+        if be not in seen:
+            seen.add(be)
+            deduped.append(be)
+    return deduped
 
 
 def calculate_max_profit_loss(
@@ -363,26 +389,69 @@ def analyze_strategy(
     # Calculate max profit/loss
     max_profit, max_loss = calculate_max_profit_loss(legs, current_price)
     
-    # Estimate profit probability using volatility
+    # Estimate profit probability using volatility.
+    # Generalised approach: figure out which underlying-price regions are
+    # profitable (P&L > 0 at expiration), then sum the risk-neutral
+    # probability mass over those regions using the lognormal CDF that
+    # `_calculate_price_probability` already implements.
+    #
+    # This handles every breakeven topology: zero breakevens (always-
+    # profitable / always-losing), one (single-leg, credit/debit spread),
+    # two (condor body, butterfly body, straddle/strangle), or four (rare
+    # multi-leg constructions).
     vol = implied_volatility or DEFAULT_VOLATILITY
     profit_probability = None
-    
-    if breakevens and days_to_expiry > 0:
-        # For strategies with breakevens, estimate probability of profit
-        # This is a simplification - real probability depends on strategy type
-        if len(breakevens) == 1:
-            # Single breakeven - estimate probability of crossing it favorably
-            be = breakevens[0]
-            if net_premium > 0:  # Credit strategy - want to stay away from breakeven
-                # Probability of NOT reaching breakeven
-                profit_probability = 1 - _calculate_price_probability(
-                    current_price, be, days_to_expiry, vol, want_above=(be > current_price)
-                )
-            else:  # Debit strategy - need to cross breakeven
-                profit_probability = _calculate_price_probability(
-                    current_price, be, days_to_expiry, vol, want_above=(be < current_price)
-                )
-            profit_probability = profit_probability * 100  # Convert to percentage
+
+    if days_to_expiry > 0 and current_price > 0:
+        # Build sorted boundary list: -inf, breakevens..., +inf
+        boundaries = sorted(set(breakevens))
+        # Probe just inside each region with a midpoint to determine sign
+        probe_points = []
+        # left of first BE
+        if boundaries:
+            probe_points.append(boundaries[0] * 0.5 if boundaries[0] > 0 else -1.0)
+        else:
+            probe_points.append(current_price)  # whole real line is one region
+        # between adjacent BEs
+        for a, b in zip(boundaries, boundaries[1:]):
+            probe_points.append((a + b) / 2)
+        # right of last BE
+        if boundaries:
+            probe_points.append(boundaries[-1] * 1.5)
+
+        regions = []  # list of (low, high, is_profitable)
+        edges = [None] + boundaries + [None]
+        for j, probe in enumerate(probe_points):
+            low = edges[j]
+            high = edges[j + 1]
+            pnl_here = calculate_strategy_pnl_at_price(legs, max(probe, 0.01))
+            # Treat exactly-zero as profitable (breakeven is not a loss). The
+            # `> 0` check would degenerate when a probe coincidentally landed
+            # on a flat region of the payoff (rare but possible for certain
+            # multi-leg constructions).
+            regions.append((low, high, pnl_here >= 0))
+
+        # Sum P(S_T in [low, high]) for profitable regions.
+        # For each finite boundary b: P(S_T > b) via _calculate_price_probability
+        # P(low < S_T < high) = P(S_T > low) - P(S_T > high)
+        # Open-ended edges use 0 (S_T > 0 is certain) or 1 (S_T > inf is zero).
+        total_prob = 0.0
+        for low, high, is_profit in regions:
+            if not is_profit:
+                continue
+            p_above_low = (
+                _calculate_price_probability(current_price, low, days_to_expiry, vol, want_above=True)
+                if low is not None and low > 0
+                else 1.0
+            )
+            p_above_high = (
+                _calculate_price_probability(current_price, high, days_to_expiry, vol, want_above=True)
+                if high is not None
+                else 0.0
+            )
+            total_prob += max(0.0, p_above_low - p_above_high)
+
+        profit_probability = min(100.0, max(0.0, total_prob * 100))
     
     return StrategyAnalysis(
         strategy_name=strategy_name,
