@@ -22,12 +22,29 @@ class Settings(BaseSettings):
     # StockNear configuration
     stocknear_base_url: str = "https://stocknear.com"
     stocknear_browser_profile_path: str = ""  # Path to LibreWolf/Firefox profile with cookies
+    # Dedicated, persistent Playwright profile directory. When set, the scraper
+    # drives ONE long-lived browser using this profile instead of launching a
+    # throwaway context + injecting cookies. You log into stocknear (and solve
+    # any Cloudflare challenge) once in that visible browser; the session and
+    # clearance persist on disk, so subsequent automated reads use the very same
+    # authenticated browser — the only reliable way past bot-verification.
+    stocknear_user_data_dir: str = ""
     stocknear_headless: bool = True
     stocknear_rate_limit_delay: float = 1.0  # Seconds between requests
     stocknear_cache_ttl_seconds: int = 3600  # 1 hour cache
     
     # Price service
     price_cache_ttl_seconds: int = 60  # 1 minute cache for stock prices
+
+    # CPI source for Reality Gap inflation adjustment (US BLS public API).
+    # CUUR0000SA0 = CPI-U, all items, US city average, not seasonally adjusted.
+    # The unregistered API allows ~25 queries/day and ≤10 years per query; an
+    # optional registered key (free) raises limits and is only needed for very
+    # long earnings histories. Annual CPI is cached aggressively (it never
+    # changes for a closed year).
+    bls_series_id: str = "CUUR0000SA0"
+    bls_api_key: str = ""
+    cpi_cache_ttl_seconds: int = 7 * 24 * 3600  # 7 days
 
     # Risk math defaults. These drive every Black-Scholes-based calculation
     # (assignment probability, BS option price for theta charts, exit

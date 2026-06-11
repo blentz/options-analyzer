@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block title %}Reality Gap - Options Trading Analyzer{% endblock %}
+
+{% block extra_head %}
+<style>
+.val-form { display: flex; gap: 0.5rem; align-items: center; margin: 1rem 0 1.5rem; }
+.val-form input {
+    padding: 0.5rem 0.75rem; background: #1e1e1e; border: 1px solid #444;
+    border-radius: 4px; color: #e0e0e0; font-size: 1rem; text-transform: uppercase; width: 8rem;
+}
+.val-form input:focus { border-color: var(--primary, #22c55e); outline: none; }
+.val-form button {
+    padding: 0.5rem 1rem; background: var(--primary, #22c55e); color: #0a0a0a;
+    border: none; border-radius: 4px; font-weight: 600; cursor: pointer;
+}
+.rg-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+.rg-card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 1rem 1.25rem; }
+.rg-card.primary { border-color: var(--primary, #22c55e); }
+.rg-card .rg-n { color: #888; font-size: 0.8rem; letter-spacing: 0.05em; }
+.rg-card .rg-val { font-size: 2rem; font-weight: 700; margin: 0.25rem 0; }
+.rg-card .rg-sub { color: #777; font-size: 0.75rem; }
+.trend { font-weight: 700; }
+.trend.up { color: var(--primary, #22c55e); } .trend.down { color: #ef4444; } .trend.flat { color: #999; }
+table.val-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+table.val-table td, table.val-table th { padding: 0.4rem 0.6rem; border-bottom: 1px solid #2a2a2a; text-align: right; }
+table.val-table th:first-child, table.val-table td:first-child { text-align: left; color: #aaa; }
+.muted { color: #777; font-size: 0.85rem; }
+.notice { background: #1a1a1a; border-left: 3px solid #f59e0b; padding: 0.75rem 1rem; border-radius: 4px; margin: 1rem 0; }
+.error { border-left-color: #ef4444; }
+.caveat { color: #777; font-size: 0.8rem; margin-top: 1.5rem; border-top: 1px solid #2a2a2a; padding-top: 1rem; }
+</style>
+{% endblock %}
+
+{% macro money(v) %}
+{%- if v is none -%}—
+{%- elif v|abs >= 1e12 -%}${{ "%.2f"|format(v/1e12) }}T
+{%- elif v|abs >= 1e9 -%}${{ "%.2f"|format(v/1e9) }}B
+{%- elif v|abs >= 1e6 -%}${{ "%.1f"|format(v/1e6) }}M
+{%- else -%}${{ "{:,.0f}".format(v) }}
+{%- endif -%}
+{% endmacro %}
+
+{% block content %}
+<h1>Reality Gap (RG)</h1>
+<p class="muted">
+    How far does a company's market value extend beyond its conservatively defined
+    fundamental base — tangible equity plus capitalized long-run earning power?
+    <strong>RG &gt; 1</strong> means market value exceeds that base. RG is a coverage
+    diagnostic, <em>not</em> a fair-value or mispricing signal.
+</p>
+
+<form class="val-form" method="get" action="/valuations">
+    <input type="text" name="symbol" placeholder="TICKER" value="{{ symbol }}" autofocus />
+    <button type="submit">Analyze</button>
+</form>
+
+{% if valuation %}
+    {% if valuation.status == 'ok' %}
+    {% set bsy = valuation.balance_sheet_year %}
+    <h2>{{ valuation.symbol }}</h2>
+    <div class="rg-cards">
+        {% for r in valuation.results %}
+        <div class="rg-card {% if r.n == 10 %}primary{% endif %}">
+            <div class="rg-n">RG{{ r.n }}{% if valuation.short_window %}*{% endif %}</div>
+            <div class="rg-val">
+                {% if r.covered %}{{ "%.1f"|format(r.value) }}{% else %}∞{% endif %}
+                {%- set t = valuation.trend %}
+                {% if t %}<span class="trend {{ 'up' if '+' in t else ('down' if '-' in t else 'flat') }}">{{ t }}</span>{% endif %}
+            </div>
+            <div class="rg-sub">
+                {% if r.covered %}{{ "covered" if r.value < 1 else "premium" }}{% else %}not fundamentally covered{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <p class="muted" style="margin-top:1rem;">
+        Earnings smoothed over {{ valuation.years_used }} year{{ 's' if valuation.years_used != 1 else '' }}
+        ({{ valuation.year_span }}){% if valuation.short_window %} — fewer than 10 years available, marked with *{% endif %}.
+        Net income {{ 'inflation-adjusted (CPI-U)' if valuation.inflation_adjusted else 'nominal (CPI unavailable)' }}.
+        Balance sheet as of FY{{ bsy }}. Trend code compares the last two rolling 3-year earnings blocks.
+    </p>
+
+    <h3>Coverage breakdown</h3>
+    <table class="val-table">
+        <tr><th>Market capitalization</th><td>{{ money(valuation.market_cap) }}</td></tr>
+        <tr><th>Book equity</th><td>{{ money(valuation.book_equity) }}</td></tr>
+        <tr><th>− Goodwill</th><td>{{ money(valuation.goodwill) }}</td></tr>
+        <tr><th>− Other intangibles</th><td>{{ money(valuation.intangibles) }}</td></tr>
+        <tr><th><strong>= Tangible equity</strong></th><td><strong>{{ money(valuation.tangible_equity) }}</strong></td></tr>
+        <tr><th>Smoothed annual earnings (G)</th><td>{{ money(valuation.smoothed_earnings) }}</td></tr>
+        <tr>
+            <th>+ Capitalized earnings (N×G)</th>
+            <td>
+                {% for r in valuation.results %}
+                    <span class="muted">N{{ r.n }}:</span> {{ money(r.capitalized_earnings) }}{% if not loop.last %} · {% endif %}
+                {% endfor %}
+            </td>
+        </tr>
+        <tr>
+            <th><strong>= Fundamental base</strong></th>
+            <td>
+                {% for r in valuation.results %}
+                    <span class="muted">N{{ r.n }}:</span> <strong>{{ money(r.fundamental_base) }}</strong>{% if not loop.last %} · {% endif %}
+                {% endfor %}
+            </td>
+        </tr>
+    </table>
+
+    <h3>Net income history</h3>
+    <table class="val-table">
+        <tr><th>Fiscal year</th><th>Net income</th></tr>
+        {% for year, ni in valuation.net_income_by_year.items() %}
+        <tr><td>{{ year }}</td><td>{{ money(ni) }}</td></tr>
+        {% endfor %}
+    </table>
+
+    {% elif valuation.status == 'insufficient_data' %}
+    <div class="notice">
+        <strong>{{ valuation.symbol }}:</strong> {{ valuation.message }}
+        {% if valuation.years_available is defined %}
+        <div class="muted">({{ valuation.years_available }} year(s) of earnings found.)</div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="notice error"><strong>{{ valuation.symbol }}:</strong> {{ valuation.message }}</div>
+    {% endif %}
+{% endif %}
+
+<p class="caveat">
+    Reality Gap (Rentschler 2026) is a deliberately heuristic coverage ratio, not an
+    intrinsic-value estimate. A high RG does not imply mispricing or imminent correction —
+    only that market value sits well above a conservatively constructed fundamental base.
+    RG8 / RG10 / RG12 vary the earnings capitalization factor N (sensitivity).
+</p>
+{% endblock %}

@@ -1142,6 +1142,40 @@ async def speculation_page(request: Request, db: AsyncSession = Depends(get_db))
     })
 
 
+@app.get("/valuations", response_class=HTMLResponse)
+async def valuations_page(request: Request, symbol: str = "", db: AsyncSession = Depends(get_db)):
+    """Reality Gap (RG) fundamental-coverage lookup.
+
+    Standalone page: enter any ticker, get RG8/RG10/RG12 + earnings trend +
+    component breakdown. `symbol` may be passed as a query param to deep-link a
+    result (the page otherwise loads empty and looks up via the API).
+    """
+    valuation = None
+    if symbol.strip():
+        from app.services.valuations import get_valuation
+        valuation = await get_valuation(db, symbol.strip())
+    return templates.TemplateResponse("valuations.html", {
+        "request": request,
+        "symbol": symbol.strip().upper(),
+        "valuation": valuation,
+    })
+
+
+@app.get("/api/valuations/lookup")
+async def api_valuations_lookup(
+    symbol: str,
+    force_refresh: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the Reality Gap report for a symbol as JSON (drives the page's
+    async lookup)."""
+    from app.services.valuations import get_valuation
+    try:
+        return await get_valuation(db, symbol, force_refresh)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/speculation/lookup")
 async def api_speculation_lookup(
     symbol: str,

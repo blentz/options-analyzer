@@ -182,3 +182,32 @@ class StockData:
     volume: Optional[int] = None
     raw_content: str = ""
 
+
+@dataclass
+class Fundamentals:
+    """Company fundamentals scraped from StockNear's financials pages, in the
+    shape the Reality Gap (RG) math needs (see app/services/rg_math.py).
+
+    Balance-sheet items are the most recent fiscal year; `net_income_by_year`
+    is the full annual history (fiscal year -> net income) used for the long-run
+    smoothed earnings average. Amounts are absolute (dollars), not millions.
+    """
+    symbol: str
+    market_cap: Optional[float] = None
+    book_equity: Optional[float] = None        # totalStockholdersEquity (latest FY)
+    goodwill: Optional[float] = None           # goodwill (latest FY)
+    intangibles: Optional[float] = None        # intangibleAssets, excl. goodwill (latest FY)
+    net_income_by_year: dict[int, float] = field(default_factory=dict)
+    balance_sheet_year: Optional[int] = None   # fiscal year of the balance-sheet figures
+    currency: Optional[str] = None
+
+    @property
+    def has_minimum_inputs(self) -> bool:
+        """RG needs market cap, a book-equity figure, and at least one year of
+        earnings. Goodwill/intangibles legitimately can be 0 (e.g. AAPL)."""
+        return (
+            self.market_cap is not None
+            and self.book_equity is not None
+            and len(self.net_income_by_year) > 0
+        )
+

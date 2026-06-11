@@ -55,13 +55,19 @@ class StockNearScraper:
     
     def __init__(self, headless: Optional[bool] = None, rate_limit_delay: Optional[float] = None):
         self.headless = headless if headless is not None else settings.stocknear_headless
-        self.rate_limit_delay = rate_limit_delay if rate_limit_delay is not None else settings.stocknear_rate_limit_delay
+        # Hard floor of 1.0s: never hit stocknear faster than one request per
+        # second, regardless of how STOCKNEAR_RATE_LIMIT_DELAY is configured.
+        # A larger value (more polite) is honored; anything smaller is clamped.
+        _delay = rate_limit_delay if rate_limit_delay is not None else settings.stocknear_rate_limit_delay
+        self.rate_limit_delay = max(1.0, _delay)
         self.base_url = settings.stocknear_base_url
         self.profile_path = settings.stocknear_browser_profile_path
-        
+        self.user_data_dir = settings.stocknear_user_data_dir
+
         self.playwright = None
         self.context: BrowserContext = None
         self.page: Page = None
+        self._persistent = False
         self._last_request_time: float = 0
 
     def __enter__(self):
@@ -72,39 +78,96 @@ class StockNearScraper:
         self.close()
 
     def start(self):
-        """Start browser and inject cookies for authenticated session."""
-        logger.info("Starting StockNear scraper (headless=%s)", self.headless)
+        """Start the browser, authenticated.
+
+        Two modes:
+
+        * **Persistent profile** (``stocknear_user_data_dir`` set): drive ONE
+          long-lived browser on a dedicated on-disk profile. You log into
+          stocknear (and solve any Cloudflare challenge) once in this visible
+          browser; the session + clearance persist, so automated reads happen in
+          the very same authenticated browser. This is the reliable way past
+          bot-verification — a throwaway context flagged as automation gets
+          challenged on protected routes no matter what cookies we inject.
+        * **Cookie injection** (legacy): launch a throwaway context and inject
+          cookies from a real Firefox profile. Works for lightly-protected
+          pages; fails Cloudflare on hardened routes.
+        """
+        logger.info("Starting StockNear scraper (headless=%s, persistent=%s)",
+                    self.headless, bool(self.user_data_dir))
         self.playwright = sync_playwright().start()
 
-        # Launch fresh browser, then inject cookies from profile
-        browser = self.playwright.firefox.launch(headless=self.headless)
-        self.context = browser.new_context(viewport={"width": 1280, "height": 800})
-
-        # Extract and add cookies if profile path is configured
-        if self.profile_path:
-            logger.info("Loading cookies from profile: %s", self.profile_path)
-            cookies = extract_browser_cookies(self.profile_path, "stocknear.com")
-            if cookies:
-                logger.info("Adding %d cookies to browser context", len(cookies))
-                self.context.add_cookies(cookies)
-            else:
-                logger.warning("No cookies found for stocknear.com - scraper will not be authenticated!")
+        if self.user_data_dir:
+            self._persistent = True
+            Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            # Persistent context owns its browser; cookies/storage live on disk.
+            self.context = self.playwright.firefox.launch_persistent_context(
+                self.user_data_dir,
+                headless=self.headless,
+                viewport={"width": 1280, "height": 900},
+            )
+            # Reduce the most obvious automation signal so Cloudflare is less
+            # likely to re-challenge a browser whose clearance you already solved.
+            try:
+                self.context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                )
+            except Exception:
+                pass
+            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         else:
-            logger.warning("No profile path configured - scraper will not be authenticated!")
+            # Legacy: throwaway context + injected cookies.
+            browser = self.playwright.firefox.launch(headless=self.headless)
+            self.context = browser.new_context(viewport={"width": 1280, "height": 800})
+            if self.profile_path:
+                logger.info("Loading cookies from profile: %s", self.profile_path)
+                cookies = extract_browser_cookies(self.profile_path, "stocknear.com")
+                if cookies:
+                    logger.info("Adding %d cookies to browser context", len(cookies))
+                    self.context.add_cookies(cookies)
+                else:
+                    logger.warning("No cookies found for stocknear.com - scraper will not be authenticated!")
+            else:
+                logger.warning("No profile path configured - scraper will not be authenticated!")
+            self.page = self.context.new_page()
 
-        self.page = self.context.new_page()
-        
-        # Test if authentication worked by checking for login state
+        # Test authentication / surface login state.
         logger.debug("Testing authentication status...")
-        self.page.goto(f"{self.base_url}/stocks/aapl", wait_until="networkidle")
-        self.page.wait_for_timeout(2000)
-        page_text = self.page.inner_text("body")
+        try:
+            self.page.goto(f"{self.base_url}/stocks/aapl", wait_until="domcontentloaded")
+            self.page.wait_for_timeout(2000)
+            page_text = self.page.inner_text("body")
+        except Exception as e:
+            logger.warning("Auth-check navigation failed: %s", e)
+            page_text = ""
         if "Login" in page_text and "Start Trial" in page_text:
             logger.warning("Authentication may have FAILED - page shows Login/Start Trial buttons")
         elif "Logout" in page_text or "Account" in page_text or "Profile" in page_text:
             logger.info("Authentication SUCCESS - user appears to be logged in")
         else:
-            logger.debug("Authentication status unclear - checking page content length: %d", len(page_text))
+            logger.debug("Authentication status unclear - page content length: %d", len(page_text))
+
+    def is_logged_in(self) -> bool:
+        """Best-effort check that the current session is authenticated."""
+        try:
+            text = self.page.inner_text("body")
+        except Exception:
+            return False
+        return ("Logout" in text or "Account" in text or "Profile" in text) and "Start Trial" not in text
+
+    def wait_for_login(self, timeout_seconds: int = 300) -> bool:
+        """Block until the user has logged in (and cleared any challenge) in the
+        visible persistent browser. Returns True once authenticated."""
+        self.page.goto(self.base_url, wait_until="domcontentloaded")
+        logger.info("Waiting up to %ds for you to log into stocknear in the browser window…", timeout_seconds)
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if self.is_logged_in():
+                logger.info("Login detected — session persisted to %s", self.user_data_dir)
+                return True
+            self.page.wait_for_timeout(1500)
+        logger.warning("Timed out waiting for login.")
+        return False
 
     def close(self):
         """Clean up browser resources."""
@@ -144,6 +207,72 @@ class StockNearScraper:
     def get_page_text(self) -> str:
         """Get visible text content from current page."""
         return self.page.inner_text("body")
+
+    def fetch_data_json(self, path: str) -> Optional[str]:
+        """Fetch a SvelteKit ``__data.json`` endpoint as the logged-in browser.
+
+        The fetch runs *inside* the current authenticated page via
+        ``page.evaluate`` (a real same-origin browser ``fetch``), so it carries
+        the live session cookies AND the browser's fingerprint — Cloudflare and
+        the server treat it exactly like the SvelteKit client requesting its own
+        page data. A bare ``context.request`` call, by contrast, lacks the
+        browser fingerprint and is rejected (HTTP 403) even when authenticated.
+
+        `path` is resolved against the page's own ``location.origin`` so it
+        stays same-origin regardless of any www/non-www redirect. Returns the
+        raw JSON text, or None on failure / non-JSON body (login redirect).
+        """
+        self._rate_limit()
+        try:
+            result = self.page.evaluate(
+                """async (p) => {
+                    const url = location.origin + p;
+                    const r = await fetch(url, {credentials: 'include', headers: {'accept': 'application/json'}});
+                    return {status: r.status, body: await r.text()};
+                }""",
+                path,
+            )
+        except Exception as e:
+            logger.error("data.json in-page fetch failed for %s: %s", path, e)
+            return None
+        if result.get("status") != 200:
+            logger.warning("data.json fetch %s -> HTTP %s", path, result.get("status"))
+            return None
+        text = result.get("body") or ""
+        if not text.lstrip().startswith("{"):
+            logger.warning("data.json fetch for %s returned non-JSON (auth/login redirect?)", path)
+            return None
+        return text
+
+    def get_fundamentals(self, symbol: str):
+        """Fetch + parse company fundamentals (income statement + balance sheet)
+        through the authenticated session. Returns a Fundamentals dataclass.
+
+        Navigates to the ticker's financials page first so the subsequent
+        ``__data.json`` fetches are same-origin reads of the page's own data —
+        the same requests the site itself makes."""
+        from app.services.stocknear_financials import (
+            INCOME_DATA_PATH, BALANCE_DATA_PATH, build_fundamentals,
+        )
+        sym = symbol.lower()
+        income_text = balance_text = None
+        # Never raise: a Cloudflare challenge can reload the page mid-call and
+        # destroy the execution context (page.goto / evaluate throw). The caller
+        # should see "data unavailable", not a hard error — so swallow here and
+        # return whatever we managed to read.
+        try:
+            # domcontentloaded, not networkidle — these pages stream/poll and
+            # never go idle within the default timeout.
+            self._rate_limit()
+            self.page.goto(
+                f"{self.base_url}/stocks/{sym}/financials",
+                wait_until="domcontentloaded", timeout=20000,
+            )
+            income_text = self.fetch_data_json(INCOME_DATA_PATH.format(sym=sym))
+            balance_text = self.fetch_data_json(BALANCE_DATA_PATH.format(sym=sym))
+        except Exception as e:
+            logger.warning("get_fundamentals(%s) blocked/failed: %s", symbol, e)
+        return build_fundamentals(symbol, income_text, balance_text)
 
     def _parse_number(self, text: str) -> Optional[float]:
         """Parse a number from text, handling K/M/B suffixes."""

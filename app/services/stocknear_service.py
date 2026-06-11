@@ -235,6 +235,14 @@ def _fetch_options_overview_sync(symbol: str) -> dict:
     return asdict(data)
 
 
+def _fetch_fundamentals_sync(symbol: str) -> dict:
+    """Fetch fundamentals via the persistent authenticated scraper. Returns a
+    dict (asdict of Fundamentals) for JSON caching."""
+    scraper = _get_or_start_persistent_scraper()
+    fundamentals = scraper.get_fundamentals(symbol)
+    return asdict(fundamentals)
+
+
 def _fetch_max_pain_sync(symbol: str) -> dict:
     scraper = _get_or_start_persistent_scraper()
     data = scraper.get_max_pain(symbol)
@@ -386,6 +394,68 @@ async def get_stock_data(
     except Exception as e:
         logger.error("Error fetching stock data for %s: %s", symbol, e)
         return None
+
+
+async def get_symbol_fundamentals(
+    db: AsyncSession,
+    symbol: str,
+    force_refresh: bool = False
+):
+    """Get company fundamentals (market cap, tangible-equity inputs, annual net
+    income history) for Reality Gap valuation.
+
+    Like the options getters, fundamentals are fetched through the persistent
+    authenticated Playwright scraper (StockNear's financials ``__data.json``
+    endpoints, read via the logged-in browser context — see
+    app/services/stocknear_financials.py and StockNearScraper.get_fundamentals).
+
+    Cached for `stocknear_cache_ttl_seconds` like other StockNear data;
+    fundamentals change at most quarterly so the default TTL is conservative.
+    """
+    from app.stocknear_models import Fundamentals
+
+    symbol = symbol.upper()
+    cache_key = f"fundamentals:{symbol}"
+
+    def _rebuild(data: dict) -> Fundamentals:
+        # JSON keys are strings on round-trip — restore int fiscal years.
+        ni = {int(y): float(v) for y, v in (data.get("net_income_by_year") or {}).items()}
+        return Fundamentals(
+            symbol=data.get("symbol", symbol),
+            market_cap=data.get("market_cap"),
+            book_equity=data.get("book_equity"),
+            goodwill=data.get("goodwill"),
+            intangibles=data.get("intangibles"),
+            net_income_by_year=ni,
+            balance_sheet_year=data.get("balance_sheet_year"),
+            currency=data.get("currency"),
+        )
+
+    if not force_refresh:
+        cached = await get_cached_data(db, cache_key)
+        if cached:
+            logger.debug("Returning cached fundamentals for %s", symbol)
+            return _rebuild(cached)
+
+    logger.info("Fetching fresh fundamentals for %s", symbol)
+    try:
+        data = await run_scraper(_fetch_fundamentals_sync, symbol)
+    except Exception as e:
+        logger.error("Error fetching fundamentals for %s: %s", symbol, e)
+        return None
+
+    fundamentals = _rebuild(data)
+    if not fundamentals.has_minimum_inputs:
+        # Don't cache a miss for the full TTL — a transient auth/redirect should
+        # be retried soon. Returning the partial result lets the caller explain
+        # exactly which input is missing.
+        logger.warning("Incomplete fundamentals for %s (mc=%s eq=%s years=%d)",
+                       symbol, fundamentals.market_cap, fundamentals.book_equity,
+                       len(fundamentals.net_income_by_year))
+        return fundamentals
+
+    await set_cached_data(db, cache_key, "fundamentals", symbol, data)
+    return fundamentals
 
 
 async def get_enriched_quote(

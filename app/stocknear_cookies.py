@@ -37,6 +37,15 @@ def extract_browser_cookies(profile_path: str, domain_filter: str = "stocknear.c
         tmp_path = Path(tmpdir) / "cookies.sqlite"
         # Restrict perms so other users on the host can't read it while alive
         shutil.copy(cookies_db, tmp_path)
+        # Firefox runs cookies.sqlite in WAL mode: a still-running browser buffers
+        # recent writes (e.g. a fresh login) in the -wal sidecar before
+        # checkpointing them into the main file. Copy -wal/-shm alongside so
+        # SQLite replays those frames and we see the current session rather than
+        # a stale token. (Missing sidecars are fine — DELETE-mode DBs lack them.)
+        for suffix in ("-wal", "-shm"):
+            sidecar = cookies_db.with_name(cookies_db.name + suffix)
+            if sidecar.exists():
+                shutil.copy(sidecar, Path(tmpdir) / (tmp_path.name + suffix))
         try:
             tmp_path.chmod(0o600)
         except Exception:
