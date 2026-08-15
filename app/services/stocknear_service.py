@@ -330,30 +330,23 @@ async def get_max_pain(
 ) -> Optional[float]:
     """
     Get max pain price for a symbol.
-    
+
+    Delegates to get_options_overview rather than fetching separately. Under
+    the scraper these were two different pages and so earned two cache keys;
+    the MCP server returns both from one get_ticker_options_overview_data
+    payload, so a second fetch would only buy double cold-cache latency, a
+    second stored copy of raw_content, and two TTLs free to drift into
+    disagreeing about the same snapshot.
+
+    Legacy `max_pain:<symbol>` rows written by the scraper are simply left to
+    expire; nothing reads them any more.
+
     Returns the max pain strike price or None if unavailable.
     """
-    symbol = symbol.upper()
-    cache_key = f"max_pain:{symbol}"
-    
-    if not force_refresh:
-        cached = await get_cached_data(db, cache_key)
-        if cached and cached.get("max_pain"):
-            logger.debug("Returning cached max pain for %s: %s", symbol, cached["max_pain"])
-            return cached["max_pain"]
-    
-    logger.info("Fetching fresh max pain for %s", symbol)
-    try:
-        # Max pain rides along on the options-overview payload — one MCP
-        # call serves both. asdict keeps the cached shape identical to what
-        # the scraper wrote, so pre-existing rows stay readable.
-        data_dict = asdict(await fetch_options_overview(symbol))
-        await set_cached_data(db, cache_key, "max_pain", symbol, data_dict)
-        logger.debug("Max pain for %s: %s", symbol, data_dict.get("max_pain"))
-        return data_dict.get("max_pain")
-    except Exception as e:
-        logger.error("Error fetching max pain for %s: %s", symbol, e)
+    options_data = await get_options_overview(db, symbol, force_refresh)
+    if options_data is None:
         return None
+    return options_data.max_pain
 
 
 async def get_stock_data(
@@ -425,10 +418,11 @@ async def get_enriched_quote(
         quote.put_call_ratio = options_data.put_call_ratio
         quote.total_open_interest = options_data.total_open_interest
     
-    # Get max pain separately (different page)
-    max_pain = await get_max_pain(db, symbol, force_refresh)
-    if max_pain:
-        quote.max_pain = max_pain
+        # Max pain arrives on the same MCP payload as the IV fields above,
+        # so it needs no separate fetch. (It did under the scraper, which
+        # read it off a different page.)
+        if options_data.max_pain:
+            quote.max_pain = options_data.max_pain
     
     return quote
 
