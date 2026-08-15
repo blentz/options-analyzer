@@ -66,7 +66,8 @@ podman run -d --name options-analyzer \
 │       ├── csv_import.py    # Fidelity CSV parsing and import
 │       ├── analytics.py     # Statistics and reporting
 │       ├── risk_analysis.py # Options payoff calculations
-│       └── price_service.py # Yahoo Finance price fetching
+│       ├── price_service.py # Yahoo Finance price fetching
+│       └── stocknear_mcp.py # StockNear MCP client (symbol-level data)
 ├── templates/               # Jinja2 HTML templates
 ├── data/                    # SQLite database (persistent volume)
 ├── Dockerfile

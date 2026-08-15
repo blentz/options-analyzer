@@ -163,152 +163,6 @@ class StockNearScraper:
         except ValueError:
             return None
 
-    def get_options_overview(self, symbol: str) -> OptionsData:
-        """
-        Get options overview data (IV, OI, volume stats) for a stock.
-        Returns parsed OptionsData with IV rank, IV percentile, etc.
-        """
-        logger.info("Scraping options overview for %s", symbol)
-        # Navigate and wait for the page to fully load
-        # Wait for text containing "IV Rank" or similar to appear
-        self.navigate(f"/stocks/{symbol.lower()}/options")
-        
-        # Wait for the main content to render - try multiple selectors
-        try:
-            # Wait for any element containing IV data to appear
-            self.page.wait_for_function(
-                """() => {
-                    const text = document.body.innerText;
-                    return text.includes('IV Rank') || 
-                           text.includes('IV Percentile') || 
-                           text.includes('Implied Volatility') ||
-                           text.includes('Put/Call Ratio') ||
-                           text.length > 5000;
-                }""",
-                timeout=15000
-            )
-        except Exception as e:
-            logger.warning("Timeout waiting for IV data to load for %s: %s", symbol, e)
-        
-        # Additional wait for dynamic content
-        self.page.wait_for_timeout(2000)
-
-        content = self.get_page_text()
-        data = OptionsData(symbol=symbol.upper(), raw_content=content)
-        
-        logger.debug("Page content length for %s: %d chars", symbol, len(content))
-        
-        # Log first 500 chars for debugging
-        if len(content) < 4000:
-            logger.warning("Short page content for %s - may not be fully loaded. First 500 chars: %s", symbol, content[:500])
-
-        # Parse IV Rank - handles newline-separated format from StockNear
-        # Format: "IV Rank\n16.28%" or "IV Rank\n16.28"
-        iv_rank_match = re.search(r'IV\s*Rank\s*[\n\r]+\s*(\d+\.?\d*)\s*%?', content, re.IGNORECASE)
-        if not iv_rank_match:
-            # Fallback: older format "IV Rank: 45.2"
-            iv_rank_match = re.search(r'IV\s*Rank[:\s\t]+(\d+\.?\d*)\s*%?', content, re.IGNORECASE)
-        if iv_rank_match:
-            data.iv_rank = float(iv_rank_match.group(1))
-            logger.debug("Parsed IV Rank: %s", data.iv_rank)
-        else:
-            logger.debug("IV Rank not found in content")
-
-        # Parse IV Percentile - handles newline-separated format
-        iv_pct_match = re.search(r'IV\s*Percentile\s*[\n\r]+\s*(\d+\.?\d*)\s*%?', content, re.IGNORECASE)
-        if not iv_pct_match:
-            iv_pct_match = re.search(r'IV\s*Percentile[:\s\t]+(\d+\.?\d*)\s*%?', content, re.IGNORECASE)
-        if iv_pct_match:
-            data.iv_percentile = float(iv_pct_match.group(1))
-            logger.debug("Parsed IV Percentile: %s", data.iv_percentile)
-        else:
-            logger.debug("IV Percentile not found in content")
-
-        # Parse Implied Volatility (current IV) - handles newline-separated StockNear format
-        # Format: "Implied Volatility (30d)\n47.02%" or "IV (30d)\n47.02% IV"
-        iv_match = re.search(r'Implied\s*Volatility\s*\([^)]*\)\s*[\n\r]+\s*(\d+\.?\d*)\s*%', content, re.IGNORECASE)
-        if not iv_match:
-            # Try: "IV (30d)\n47.02% IV" format
-            iv_match = re.search(r'IV\s*\(\d+d\)\s*[\n\r]+\s*(\d+\.?\d*)\s*%', content, re.IGNORECASE)
-        if not iv_match:
-            # Fallback: "47.02% IV" near "Implied Volatility" 
-            iv_match = re.search(r'(\d+\.?\d*)\s*%\s*IV\b', content, re.IGNORECASE)
-        if not iv_match:
-            # Fallback: older inline format
-            iv_match = re.search(r'Implied\s*Volatility(?:\s*\(IV\))?[:\s\t]+(\d+\.?\d*)\s*%', content, re.IGNORECASE)
-        if iv_match:
-            data.implied_volatility = float(iv_match.group(1)) / 100  # Convert to decimal
-            logger.debug("Parsed IV: %s", data.implied_volatility)
-        else:
-            logger.debug("Implied Volatility not found in content")
-
-        # Parse Put/Call Ratio - handles newline-separated format
-        # Format: "Put-Call Ratio\n0.68" or "Put/Call Ratio\n0.44"
-        pcr_match = re.search(r'Put[/-]Call\s*Ratio\s*[\n\r]+\s*(\d+\.?\d*)', content, re.IGNORECASE)
-        if not pcr_match:
-            # Fallback: inline format
-            pcr_match = re.search(r'Put[/\s-]*Call\s*Ratio[:\s\t]+(\d+\.?\d*)', content, re.IGNORECASE)
-        if pcr_match:
-            data.put_call_ratio = float(pcr_match.group(1))
-            logger.debug("Parsed Put/Call Ratio: %s", data.put_call_ratio)
-
-        # Parse Total Volume - handles newline-separated format
-        vol_match = re.search(r'Today\'s\s*Volume\s*[\n\r]+\s*([\d,]+)', content, re.IGNORECASE)
-        if not vol_match:
-            vol_match = re.search(r'Total\s*(?:Options\s*)?Volume[:\s\t\n\r]+([\d,]+[KMB]?)', content, re.IGNORECASE)
-        if vol_match:
-            data.total_volume = int(self._parse_number(vol_match.group(1)) or 0)
-            logger.debug("Parsed Total Volume: %s", data.total_volume)
-
-        # Parse Total Open Interest - handles newline-separated format
-        oi_match = re.search(r'Today\'s\s*Open\s*Interest\s*[\n\r]+\s*([\d,]+)', content, re.IGNORECASE)
-        if not oi_match:
-            oi_match = re.search(r'(?:Total\s*)?Open\s*Interest[:\s\t\n\r]+([\d,]+[KMB]?)', content, re.IGNORECASE)
-        if oi_match:
-            data.total_open_interest = int(self._parse_number(oi_match.group(1)) or 0)
-
-        logger.info(
-            "Options overview for %s: IV=%s, IV_Rank=%s, IV_Pct=%s, PCR=%s",
-            symbol, data.implied_volatility, data.iv_rank, data.iv_percentile, data.put_call_ratio
-        )
-        return data
-
-    def get_max_pain(self, symbol: str) -> OptionsData:
-        """Get max pain analysis for a stock's options."""
-        self.navigate(f"/stocks/{symbol.lower()}/options/max-pain")
-        self.page.wait_for_timeout(2000)
-
-        content = self.get_page_text()
-        data = OptionsData(symbol=symbol.upper(), raw_content=content)
-
-        # Parse max pain price
-        max_pain_match = re.search(r'Max\s*Pain[:\s]*\$?([\d,]+\.?\d*)', content, re.IGNORECASE)
-        if max_pain_match:
-            data.max_pain = self._parse_number(max_pain_match.group(1))
-
-        return data
-
-    def get_stock_overview(self, symbol: str) -> StockData:
-        """Get overview data for a stock."""
-        self.navigate(f"/stocks/{symbol.lower()}")
-        self.page.wait_for_timeout(2000)
-
-        content = self.get_page_text()
-        data = StockData(symbol=symbol.upper(), raw_content=content)
-
-        # Parse current price - look for dollar amount near the top
-        price_match = re.search(r'\$(\d+\.?\d*)', content)
-        if price_match:
-            data.price = float(price_match.group(1))
-
-        # Parse change
-        change_match = re.search(r'([+-]?\d+\.?\d*)\s*\(([+-]?\d+\.?\d*)%\)', content)
-        if change_match:
-            data.change = float(change_match.group(1))
-            data.change_percent = float(change_match.group(2))
-
-        return data
-
     def get_options_chain(self, symbol: str, expiration: str = None) -> dict:
         """Get options chain with Greeks for a stock."""
         self.navigate(f"/stocks/{symbol.lower()}/options/greeks")
@@ -516,101 +370,6 @@ class StockNearScraper:
             symbol, chain.current_price, len(chain.expirations), len(chain.contracts)
         )
         return chain
-
-    def get_available_expirations(self, symbol: str) -> list[str]:
-        """Get list of available expiration dates for a symbol's options."""
-        self.navigate(f"/stocks/{symbol.lower()}/options")
-        self.page.wait_for_timeout(2000)
-        
-        content = self.get_page_text()
-        
-        # Look for date patterns that appear to be expirations
-        # StockNear typically shows dates like "Jan 17", "Feb 21", etc.
-        expirations = []
-        
-        # Pattern for month day format
-        month_day_pattern = re.compile(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', re.IGNORECASE)
-        matches = month_day_pattern.findall(content)
-        
-        # Convert to standardized format and dedupe
-        seen = set()
-        for month, day in matches:
-            exp_str = f"{month} {day}"
-            if exp_str not in seen:
-                seen.add(exp_str)
-                expirations.append(exp_str)
-        
-        return expirations[:15]  # Return up to 15 expirations
-
-    def get_options_flow(self, symbol: str = None) -> dict:
-        """Get options flow data, optionally filtered by symbol."""
-        if symbol:
-            self.navigate(f"/stocks/{symbol.lower()}")
-            self.page.wait_for_timeout(2000)
-            try:
-                self.page.click("text=Unusual Orders", timeout=3000)
-                self.page.wait_for_timeout(2000)
-            except:
-                pass
-        else:
-            self.navigate("/options-flow")
-            self.page.wait_for_timeout(2000)
-
-        return {
-            "symbol": symbol.upper() if symbol else "ALL",
-            "url": self.page.url,
-            "content": self.get_page_text()
-        }
-
-    def get_dark_pool(self, symbol: str = None) -> dict:
-        """Get dark pool transaction data."""
-        path = "/darkpool-flow" if not symbol else f"/stocks/{symbol.lower()}"
-        self.navigate(path)
-        self.page.wait_for_timeout(2000)
-
-        return {
-            "symbol": symbol.upper() if symbol else "ALL",
-            "url": self.page.url,
-            "content": self.get_page_text()
-        }
-
-    def get_analyst_ratings(self, symbol: str) -> dict:
-        """Get analyst ratings and price targets for a stock."""
-        self.navigate(f"/stocks/{symbol.lower()}")
-        self.page.wait_for_timeout(2000)
-        try:
-            self.page.click("text=Forecast", timeout=3000)
-            self.page.wait_for_timeout(2000)
-        except:
-            pass
-
-        return {
-            "symbol": symbol.upper(),
-            "url": self.page.url,
-            "content": self.get_page_text()
-        }
-
-    def get_options_gex(self, symbol: str) -> dict:
-        """Get gamma exposure (GEX) data for a stock's options."""
-        self.navigate(f"/stocks/{symbol.lower()}/options/gex/strike")
-        self.page.wait_for_timeout(2000)
-
-        return {
-            "symbol": symbol.upper(),
-            "url": self.page.url,
-            "content": self.get_page_text()
-        }
-
-    def get_options_dex(self, symbol: str) -> dict:
-        """Get delta exposure (DEX) data for a stock's options."""
-        self.navigate(f"/stocks/{symbol.lower()}/options/dex/strike")
-        self.page.wait_for_timeout(2000)
-
-        return {
-            "symbol": symbol.upper(),
-            "url": self.page.url,
-            "content": self.get_page_text()
-        }
 
     def _build_contract_id(self, symbol: str, expiration: str, option_type: str, strike: float) -> str:
         """
@@ -1318,62 +1077,68 @@ class StockNearScraper:
 
 
 def main():
-    """CLI interface for the scraper."""
-    if len(sys.argv) < 2:
-        print("Usage: python stocknear.py <command> [args]")
-        print("\nStock Commands:")
-        print("  stock <symbol>        - Get stock overview")
-        print("  ratings <symbol>      - Get analyst ratings")
-        print("\nOptions Commands:")
+    """CLI interface.
+
+    Symbol-level commands go through the MCP server; only the chain command
+    still needs the browser. Run with `python -m app.stocknear <command>`.
+    """
+    import asyncio
+
+    from app.services.stocknear_mcp import (
+        call_tool,
+        fetch_options_overview,
+        fetch_stock_overview,
+    )
+
+    if len(sys.argv) < 3:
+        print("Usage: python -m app.stocknear <command> <symbol>")
+        print("\nMCP-backed commands:")
+        print("  stock <symbol>             - Get stock overview")
         print("  options-overview <symbol>  - Get options overview (IV, OI, volume)")
-        print("  options-chain <symbol>     - Get options chain with Greeks")
-        print("  max-pain <symbol>     - Get max pain analysis")
-        print("  gex <symbol>          - Get gamma exposure (GEX)")
-        print("  dex <symbol>          - Get delta exposure (DEX)")
-        print("  options [symbol]      - Get options flow (unusual orders)")
-        print("  darkpool [symbol]     - Get dark pool data")
+        print("  max-pain <symbol>          - Get max pain analysis")
+        print("  ratings <symbol>           - Get analyst ratings")
+        print("  flow <symbol>              - Get options flow (unusual orders)")
+        print("\nScraper-backed commands:")
+        print("  options-chain <symbol> [expiration] - Get options chain with Greeks")
         sys.exit(1)
 
     command = sys.argv[1].lower()
+    symbol = sys.argv[2]
 
-    with StockNearScraper() as scraper:
-        if command == "stock" and len(sys.argv) > 2:
-            result = scraper.get_stock_overview(sys.argv[2])
-            result = {"symbol": result.symbol, "price": result.price, "change": result.change}
-        elif command == "options-overview" and len(sys.argv) > 2:
-            result = scraper.get_options_overview(sys.argv[2])
-            result = {
-                "symbol": result.symbol,
-                "iv_rank": result.iv_rank,
-                "iv_percentile": result.iv_percentile,
-                "implied_volatility": result.implied_volatility,
-                "put_call_ratio": result.put_call_ratio,
-                "total_volume": result.total_volume,
-                "total_open_interest": result.total_open_interest
-            }
-        elif command == "max-pain" and len(sys.argv) > 2:
-            result = scraper.get_max_pain(sys.argv[2])
-            result = {"symbol": result.symbol, "max_pain": result.max_pain}
-        elif command == "options-chain" and len(sys.argv) > 2:
-            expiration = sys.argv[3] if len(sys.argv) > 3 else None
-            result = scraper.get_options_chain(sys.argv[2], expiration)
-        elif command == "gex" and len(sys.argv) > 2:
-            result = scraper.get_options_gex(sys.argv[2])
-        elif command == "dex" and len(sys.argv) > 2:
-            result = scraper.get_options_dex(sys.argv[2])
-        elif command == "options":
-            symbol = sys.argv[2] if len(sys.argv) > 2 else None
-            result = scraper.get_options_flow(symbol)
-        elif command == "darkpool":
-            symbol = sys.argv[2] if len(sys.argv) > 2 else None
-            result = scraper.get_dark_pool(symbol)
-        elif command == "ratings" and len(sys.argv) > 2:
-            result = scraper.get_analyst_ratings(sys.argv[2])
-        else:
-            print(f"Unknown command or missing arguments: {command}")
-            sys.exit(1)
+    if command == "options-chain":
+        expiration = sys.argv[3] if len(sys.argv) > 3 else None
+        with StockNearScraper() as scraper:
+            result = scraper.get_options_chain(symbol, expiration)
+    elif command == "stock":
+        stock_data = asyncio.run(fetch_stock_overview(symbol))
+        result = {"symbol": stock_data.symbol, "price": stock_data.price, "change": stock_data.change}
+    elif command == "options-overview":
+        options_data = asyncio.run(fetch_options_overview(symbol))
+        result = {
+            "symbol": options_data.symbol,
+            "iv_rank": options_data.iv_rank,
+            "iv_percentile": options_data.iv_percentile,
+            "implied_volatility": options_data.implied_volatility,
+            "put_call_ratio": options_data.put_call_ratio,
+            "total_volume": options_data.total_volume,
+            "total_open_interest": options_data.total_open_interest,
+        }
+    elif command == "max-pain":
+        options_data = asyncio.run(fetch_options_overview(symbol))
+        result = {"symbol": options_data.symbol, "max_pain": options_data.max_pain}
+    elif command == "ratings":
+        result = asyncio.run(
+            call_tool("get_ticker_analyst_rating", {"tickers": [symbol.upper()]})
+        )
+    elif command == "flow":
+        result = asyncio.run(
+            call_tool("get_ticker_unusual_activity", {"tickers": [symbol.upper()]})
+        )
+    else:
+        print(f"Unknown command or missing arguments: {command}")
+        sys.exit(1)
 
-        print(json.dumps(result, indent=2, default=str))
+    print(json.dumps(result, indent=2, default=str))
 
 
 if __name__ == "__main__":

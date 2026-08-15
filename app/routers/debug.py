@@ -25,36 +25,23 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 @router.get("/stocknear/{symbol}")
 async def debug_stocknear(symbol: str, db: AsyncSession = Depends(get_db)):
     """
-    Debug endpoint to view raw scraped content from StockNear.
-    Useful for debugging regex patterns.
+    Debug endpoint to view the raw MCP payloads behind a symbol's data.
+
+    Symbol-level data now comes from the MCP server rather than scraped
+    pages, so this dumps the decoded tool payloads instead of page text.
     """
-    from app.stocknear import StockNearScraper
-    import asyncio
-    
-    def scrape_sync():
-        with StockNearScraper() as scraper:
-            # Get the options overview page content
-            scraper.navigate(f"/stocks/{symbol.lower()}/options")
-            scraper.page.wait_for_timeout(3000)
-            overview_content = scraper.get_page_text()
-            
-            # Get the chain page content
-            scraper.navigate(f"/stocks/{symbol.lower()}/options/chain")
-            scraper.page.wait_for_timeout(3000)
-            chain_content = scraper.get_page_text()
-            
-            return {
-                "overview_url": f"https://stocknear.com/stocks/{symbol.lower()}/options",
-                "overview_content": overview_content,
-                "overview_length": len(overview_content),
-                "chain_url": f"https://stocknear.com/stocks/{symbol.lower()}/options/chain",
-                "chain_content": chain_content,
-                "chain_length": len(chain_content),
-            }
-    
-    from app.services.stocknear_service import run_scraper
-    result = await run_scraper(scrape_sync)
-    return result
+    from app.services.stocknear_mcp import StockNearMCPError, call_tool
+
+    out: dict = {"symbol": symbol.upper()}
+    for label, tool in (
+        ("options_overview", "get_ticker_options_overview_data"),
+        ("quote", "get_ticker_quote"),
+    ):
+        try:
+            out[label] = await call_tool(tool, {"tickers": [symbol.upper()]})
+        except StockNearMCPError as exc:
+            out[label] = {"error": str(exc)}
+    return out
 
 
 @router.get("/stocknear-api/{symbol}")

@@ -84,6 +84,7 @@ curl http://localhost:8000/api/stats
 | `app/services/analytics.py` | Statistics queries and aggregations |
 | `app/services/risk_analysis.py` | Options payoff calculations |
 | `app/services/price_service.py` | Yahoo Finance API client with caching |
+| `app/services/stocknear_mcp.py` | StockNear MCP client: options overview, max pain, stock quote, expirations |
 | `templates/base.html` | Base template with nav, styles |
 | `templates/dashboard.html` | Main dashboard with stats and charts |
 | `templates/positions.html` | Position list with filters |
@@ -115,7 +116,10 @@ Core dependencies:
 - `httpx` - Async HTTP client (Yahoo Finance, with retry)
 - `jinja2` - Templates
 - `python-multipart` - File uploads
-- `playwright` - StockNear scraper (Firefox, persistent context)
+- `playwright` - StockNear contract-quote scraper (Firefox, persistent context).
+  Symbol-level data comes from the StockNear MCP server over httpx instead —
+  see `app/services/stocknear_mcp.py`. The MCP server has no bid/ask or
+  greeks for an arbitrary strike, which is why the scraper still exists.
 - `scipy` - Probability functions (norm.ppf)
 - `yfinance` - Options chains fallback
 
