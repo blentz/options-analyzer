@@ -16,6 +16,7 @@ from app.services import stocknear_mcp
 from app.services.stocknear_mcp import (
     StockNearMCPNoData,
     _pct_to_decimal,
+    _plausible_iv_rank,
     _select_max_pain,
     fetch_options_overview,
 )
@@ -168,3 +169,54 @@ async def test_fetch_options_overview_selects_max_pain_from_table(monkeypatch):
     data = await fetch_options_overview("AAPL")
 
     assert data.max_pain == 250.0
+
+
+# --- IV Rank plausibility ------------------------------------------------
+#
+# StockNear computes ivRank as (current - ivLow) / (ivHigh - ivLow) * 100.
+# Verified against live data on 2026-08-15: GME returned ivRank 17.66 with
+# current 73.11, ivLow 54.83, ivHigh 158.33, which reproduces exactly.
+#
+# The problem is that ivHigh is sometimes corrupt upstream — the same probe
+# saw 13482% (NVDA), 21947% (MSTR), 54297% (F) and 358042% (AMC). A corrupt
+# ivHigh does not make ivRank null; it makes it a plausible-looking near-zero.
+# Ford came back with ivRank 0.03 next to ivPercentile 73.83: the rank says
+# "IV at the bottom of its range", the percentile says "higher than 74% of
+# the year". Rendering 0.03 as a live IV Rank is worse than rendering nothing.
+
+
+def test_iv_rank_is_kept_when_iv_high_is_plausible():
+    assert _plausible_iv_rank(17.66, iv_high=158.33) == 17.66
+
+
+def test_iv_rank_is_dropped_when_iv_high_is_absurd():
+    """Ford's real 2026-08-15 payload: ivHigh of 54297% is not a real quote."""
+    assert _plausible_iv_rank(0.03, iv_high=54297.3) is None
+
+
+def test_iv_rank_is_kept_when_iv_high_is_missing():
+    """No ivHigh to judge by means no grounds to reject the server's rank."""
+    assert _plausible_iv_rank(42.0, iv_high=None) == 42.0
+
+
+def test_iv_rank_none_stays_none():
+    assert _plausible_iv_rank(None, iv_high=158.33) is None
+
+
+def test_iv_rank_zero_survives_a_plausible_iv_high():
+    """0.0 is a legitimate rank when the range it came from is sane."""
+    assert _plausible_iv_rank(0.0, iv_high=158.33) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_options_overview_drops_iv_rank_from_corrupt_iv_high(monkeypatch):
+    """End-to-end: the guard is actually wired into the mapping."""
+    _stub_call_tool(monkeypatch, {"F": {"impliedVolatility": {
+        "current": 48.83, "ivRank": 0.03, "ivPercentile": 73.83,
+        "ivLow": 35.16, "ivHigh": 54297.3,
+    }}})
+
+    data = await fetch_options_overview("F")
+
+    assert data.iv_rank is None
+    assert data.iv_percentile == 73.83, "percentile is independent and must survive"

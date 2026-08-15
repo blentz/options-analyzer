@@ -122,6 +122,41 @@ def _pct_to_decimal(value: float | None) -> float | None:
     return value / 100
 
 
+# Ceiling, in percent, above which a 52-week IV high is treated as corrupt
+# rather than extreme. Real equity IV tops out far below this — GME's 2021
+# squeeze peaked near 158%, and even binary-event biotechs stay under ~500%.
+# A live probe on 2026-08-15 found ivHigh values of 13482 (NVDA), 21947
+# (MSTR), 54297 (F) and 358042 (AMC), so there is a wide gap between the
+# largest real reading and the smallest corrupt one.
+MAX_PLAUSIBLE_IV_PCT = 1000.0
+
+
+def _plausible_iv_rank(iv_rank: float | None, iv_high: float | None) -> float | None:
+    """Drop an IV Rank that was computed from a corrupt 52-week high.
+
+    StockNear derives ivRank as (current - ivLow) / (ivHigh - ivLow) * 100.
+    When ivHigh is garbage the division still succeeds, so the rank arrives
+    as a plausible-looking near-zero rather than as null — Ford came back
+    with ivRank 0.03 alongside ivPercentile 73.83, the two disagreeing about
+    where IV sits by seventy points. A blank IV Rank is honest; one computed
+    from a 54297% high is not, and it is the kind of wrong that reads as
+    "IV is cheap" to someone sizing a trade.
+
+    ivPercentile is computed independently and is unaffected, so it is left
+    alone deliberately.
+    """
+    if iv_rank is None or iv_high is None:
+        return iv_rank
+    if iv_high > MAX_PLAUSIBLE_IV_PCT:
+        logger.warning(
+            "Discarding ivRank=%s: ivHigh=%s%% exceeds the %s%% plausibility "
+            "ceiling, so the rank was derived from a corrupt range",
+            iv_rank, iv_high, MAX_PLAUSIBLE_IV_PCT,
+        )
+        return None
+    return iv_rank
+
+
 def _select_max_pain(table: list[dict], today: date) -> float | None:
     """Pick the max pain strike from the nearest expiry that still has one.
 
@@ -164,7 +199,7 @@ async def fetch_options_overview(symbol: str) -> OptionsData:
 
     return OptionsData(
         symbol=symbol,
-        iv_rank=volatility.get("ivRank"),
+        iv_rank=_plausible_iv_rank(volatility.get("ivRank"), volatility.get("ivHigh")),
         iv_percentile=volatility.get("ivPercentile"),
         implied_volatility=_pct_to_decimal(volatility.get("current")),
         historical_volatility=_pct_to_decimal(volatility.get("historicalVolatility")),
