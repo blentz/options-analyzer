@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     stocknear_headless: bool = True
     stocknear_rate_limit_delay: float = 1.0  # Seconds between requests
     stocknear_cache_ttl_seconds: int = 3600  # 1 hour cache
+
+    # StockNear MCP server. Symbol-level data (options overview, max pain,
+    # stock quote, expirations) comes from here rather than the scraper.
+    # The token is a credential — set it in .env, never commit it.
+    stocknear_mcp_url: str = "https://mcp.stocknear.com/mcp"
+    stocknear_mcp_token: str = ""
+    stocknear_mcp_timeout: int = 30
     
     # Price service
     price_cache_ttl_seconds: int = 60  # 1 minute cache for stock prices
