@@ -1086,6 +1086,7 @@ def main():
 
     from app.services.stocknear_mcp import (
         call_tool,
+        fetch_expirations,
         fetch_options_overview,
         fetch_stock_overview,
     )
@@ -1096,6 +1097,7 @@ def main():
         print("  stock <symbol>             - Get stock overview")
         print("  options-overview <symbol>  - Get options overview (IV, OI, volume)")
         print("  max-pain <symbol>          - Get max pain analysis")
+        print("  expirations <symbol>       - List available option expiries")
         print("  ratings <symbol>           - Get analyst ratings")
         print("  flow <symbol>              - Get options flow (unusual orders)")
         print("\nScraper-backed commands:")
@@ -1126,6 +1128,9 @@ def main():
     elif command == "max-pain":
         options_data = asyncio.run(fetch_options_overview(symbol))
         result = {"symbol": options_data.symbol, "max_pain": options_data.max_pain}
+    elif command == "expirations":
+        result = {"symbol": symbol.upper(),
+                  "expirations": asyncio.run(fetch_expirations(symbol))}
     elif command == "ratings":
         result = asyncio.run(
             call_tool("get_ticker_analyst_rating", {"tickers": [symbol.upper()]})

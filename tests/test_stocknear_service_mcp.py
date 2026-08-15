@@ -161,94 +161,16 @@ async def test_get_options_overview_clears_iv_rank_when_fresh_is_null(
 
 
 @pytest.mark.asyncio
-async def test_get_max_pain_returns_none_on_no_data(monkeypatch, fake_cache):
-    async def boom(symbol):
-        raise StockNearMCPNoData("unknown symbol")
-
-    monkeypatch.setattr(stocknear_service, "fetch_options_overview", boom)
-
-    assert await stocknear_service.get_max_pain(db=None, symbol="ZZZZ") is None
-
-
-@pytest.mark.asyncio
 async def test_no_data_does_not_write_a_cache_row(monkeypatch, fake_cache):
-    """A missing symbol must not write an empty row over good data.
-
-    Asserts on the options_overview key, which is the one actually written
-    now that max pain shares it — asserting `max_pain:ZZZZ` is absent would
-    pass whatever the code did, since nothing writes that key any more.
-    """
+    """A missing symbol must not write an empty row over good data."""
     async def boom(symbol):
         raise StockNearMCPNoData("unknown symbol")
 
     monkeypatch.setattr(stocknear_service, "fetch_options_overview", boom)
-    await stocknear_service.get_max_pain(db=None, symbol="ZZZZ")
+    result = await stocknear_service.get_options_overview(db=None, symbol="ZZZZ")
 
-    assert "options_overview:ZZZZ" not in fake_cache
+    assert result is None
     assert fake_cache == {}
-
-
-# --- One payload, one fetch ---------------------------------------------
-#
-# Under the scraper, max pain and the options overview genuinely came from
-# two different pages, so two fetches and two cache keys were right. The MCP
-# server serves both from one get_ticker_options_overview_data payload, so a
-# second fetch is now pure duplication — double latency on a cold cache, the
-# full raw_content stored twice, and two keys with independent TTLs that can
-# drift into disagreeing about the same underlying snapshot.
-
-
-@pytest.mark.asyncio
-async def test_get_max_pain_does_not_refetch_when_overview_is_cached(
-    monkeypatch, fake_cache
-):
-    calls = []
-
-    async def counting_fetch(symbol):
-        calls.append(symbol)
-        return OptionsData(symbol=symbol, max_pain=250.0, implied_volatility=0.31)
-
-    monkeypatch.setattr(stocknear_service, "fetch_options_overview", counting_fetch)
-
-    first = await stocknear_service.get_options_overview(db=None, symbol="AAPL")
-    second = await stocknear_service.get_max_pain(db=None, symbol="AAPL")
-
-    assert first.max_pain == 250.0
-    assert second == 250.0
-    assert calls == ["AAPL"], f"expected one upstream fetch, got {len(calls)}"
-
-
-@pytest.mark.asyncio
-async def test_get_max_pain_shares_the_overview_cache_key(monkeypatch, fake_cache):
-    """No second cache key means no second copy of raw_content, and no drift."""
-    async def fake_fetch(symbol):
-        return OptionsData(symbol=symbol, max_pain=250.0, raw_content='{"big": "payload"}')
-
-    monkeypatch.setattr(stocknear_service, "fetch_options_overview", fake_fetch)
-
-    await stocknear_service.get_max_pain(db=None, symbol="AAPL")
-
-    assert "options_overview:AAPL" in fake_cache
-    assert "max_pain:AAPL" not in fake_cache
-
-
-@pytest.mark.asyncio
-async def test_get_enriched_quote_takes_max_pain_from_the_same_payload(
-    monkeypatch, fake_cache
-):
-    calls = []
-
-    async def counting_fetch(symbol):
-        calls.append(symbol)
-        return OptionsData(symbol=symbol, max_pain=250.0, implied_volatility=0.31)
-
-    monkeypatch.setattr(stocknear_service, "fetch_options_overview", counting_fetch)
-
-    quote = await stocknear_service.get_enriched_quote(db=None, symbol="AAPL")
-
-    assert quote.max_pain == 250.0
-    assert quote.implied_volatility == pytest.approx(0.31)
-    assert calls == ["AAPL"], f"expected one upstream fetch, got {len(calls)}"
 
 
 @pytest.mark.asyncio

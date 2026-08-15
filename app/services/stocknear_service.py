@@ -17,7 +17,7 @@ import threading
 import time as _time
 from datetime import datetime, timedelta
 from typing import Optional, Callable
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 
@@ -122,31 +122,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import StockNearCache
-from app.stocknear import StockNearScraper, OptionsData, StockData, OptionsChain, OptionContract, ContractQuote
-from app.services.stocknear_mcp import (
-    fetch_expirations,
-    fetch_options_overview,
-    fetch_stock_overview,
-)
-
-
-@dataclass
-class EnrichedQuote:
-    """Stock quote enriched with options data from StockNear."""
-    symbol: str
-    price: Optional[float] = None
-    change: Optional[float] = None
-    change_percent: Optional[float] = None
-    
-    # Options data
-    implied_volatility: Optional[float] = None  # As decimal (0.35 = 35%)
-    iv_rank: Optional[float] = None  # 0-100
-    iv_percentile: Optional[float] = None  # 0-100
-    put_call_ratio: Optional[float] = None
-    max_pain: Optional[float] = None
-    total_open_interest: Optional[int] = None
-    
-    fetched_at: Optional[datetime] = None
+from app.stocknear import StockNearScraper, OptionsData, OptionsChain, OptionContract, ContractQuote
+from app.services.stocknear_mcp import fetch_options_overview
 
 
 async def get_cached_data(
@@ -323,130 +300,6 @@ async def get_options_overview(
         return None
 
 
-async def get_max_pain(
-    db: AsyncSession,
-    symbol: str,
-    force_refresh: bool = False
-) -> Optional[float]:
-    """
-    Get max pain price for a symbol.
-
-    Delegates to get_options_overview rather than fetching separately. Under
-    the scraper these were two different pages and so earned two cache keys;
-    the MCP server returns both from one get_ticker_options_overview_data
-    payload, so a second fetch would only buy double cold-cache latency, a
-    second stored copy of raw_content, and two TTLs free to drift into
-    disagreeing about the same snapshot.
-
-    Legacy `max_pain:<symbol>` rows written by the scraper are simply left to
-    expire; nothing reads them any more.
-
-    Returns the max pain strike price or None if unavailable.
-    """
-    options_data = await get_options_overview(db, symbol, force_refresh)
-    if options_data is None:
-        return None
-    return options_data.max_pain
-
-
-async def get_stock_data(
-    db: AsyncSession,
-    symbol: str,
-    force_refresh: bool = False
-) -> Optional[StockData]:
-    """
-    Get stock overview data from StockNear.
-    
-    Note: For real-time prices, prefer price_service.get_stock_price()
-    which uses Yahoo Finance. This is for additional StockNear-specific data.
-    """
-    symbol = symbol.upper()
-    cache_key = f"stock_overview:{symbol}"
-    
-    if not force_refresh:
-        cached = await get_cached_data(db, cache_key)
-        if cached:
-            logger.debug("Returning cached stock data for %s", symbol)
-            return StockData(**cached)
-    
-    logger.info("Fetching fresh stock data for %s", symbol)
-    try:
-        data_dict = asdict(await fetch_stock_overview(symbol))
-        await set_cached_data(db, cache_key, "stock_overview", symbol, data_dict)
-        return StockData(**data_dict)
-    except Exception as e:
-        logger.error("Error fetching stock data for %s: %s", symbol, e)
-        return None
-
-
-async def get_enriched_quote(
-    db: AsyncSession,
-    symbol: str,
-    current_price: Optional[float] = None,
-    force_refresh: bool = False
-) -> EnrichedQuote:
-    """
-    Get a quote enriched with options data.
-    
-    Combines price data with IV, max pain, and other options metrics.
-    
-    Args:
-        db: Database session
-        symbol: Stock ticker
-        current_price: If provided, use this price instead of fetching
-        force_refresh: Bypass cache
-    
-    Returns:
-        EnrichedQuote with all available data
-    """
-    symbol = symbol.upper()
-    
-    # Fetch options overview (includes IV)
-    options_data = await get_options_overview(db, symbol, force_refresh)
-    
-    # Create enriched quote
-    quote = EnrichedQuote(
-        symbol=symbol,
-        price=current_price,
-        fetched_at=datetime.utcnow()
-    )
-    
-    if options_data:
-        quote.implied_volatility = options_data.implied_volatility
-        quote.iv_rank = options_data.iv_rank
-        quote.iv_percentile = options_data.iv_percentile
-        quote.put_call_ratio = options_data.put_call_ratio
-        quote.total_open_interest = options_data.total_open_interest
-    
-        # Max pain arrives on the same MCP payload as the IV fields above,
-        # so it needs no separate fetch. (It did under the scraper, which
-        # read it off a different page.)
-        if options_data.max_pain:
-            quote.max_pain = options_data.max_pain
-    
-    return quote
-
-
-async def get_live_iv_for_symbols(
-    db: AsyncSession,
-    symbols: list[str],
-    force_refresh: bool = False
-) -> dict[str, Optional[float]]:
-    """
-    Get implied volatility for multiple symbols.
-    
-    Returns dict mapping symbol -> IV (as decimal, e.g., 0.35 for 35%)
-    """
-    results: dict[str, Optional[float]] = {}
-
-    for symbol in symbols:
-        options_data = await get_options_overview(db, symbol, force_refresh)
-        if options_data and options_data.implied_volatility:
-            results[symbol] = options_data.implied_volatility
-        else:
-            results[symbol] = None
-    
-    return results
 
 
 def _chain_from_dict(d: dict) -> OptionsChain:
@@ -584,40 +437,6 @@ async def get_options_chain(
         return None
 
 
-async def get_available_expirations(
-    db: AsyncSession,
-    symbol: str,
-    force_refresh: bool = False
-) -> list[str]:
-    """
-    Get list of available expiration dates for a symbol.
-    
-    Returns list of expiration date strings.
-    """
-    symbol = symbol.upper()
-    cache_key = f"expirations:{symbol}"
-    
-    if not force_refresh:
-        cached: object = await get_cached_data(db, cache_key)
-        # Historical rows may be either a raw list or a {"expirations": [...]}
-        # dict — handle both shapes.
-        if isinstance(cached, list):
-            logger.debug("Returning cached expirations for %s (%d dates)", symbol, len(cached))
-            return cached
-        if isinstance(cached, dict) and "expirations" in cached:
-            exps = cached["expirations"]
-            logger.debug("Returning cached expirations for %s (%d dates)", symbol, len(exps))
-            return exps
-    
-    logger.info("Fetching fresh expirations for %s", symbol)
-    try:
-        expirations = await fetch_expirations(symbol)
-        await set_cached_data(db, cache_key, "expirations", symbol, {"expirations": expirations})
-        logger.debug("Got %d expirations for %s", len(expirations), symbol)
-        return expirations
-    except Exception as e:
-        logger.error("Error fetching expirations for %s: %s", symbol, e)
-        return []
 
 
 async def get_symbol_speculation_data(
@@ -633,12 +452,11 @@ async def get_symbol_speculation_data(
         which carries IV/rank/percentile, put-call ratio, total OI,
         expirations, and nearest-expiry max-pain.
 
-    Previously this function hit Playwright three times — get_options_chain,
-    get_options_overview, and get_max_pain — even though all three pulled
-    from the same StockNear page. On a cold container that meant ~30-60s of
-    serialized browser-driven scraping per first lookup. Collapsing to a
-    single chain fetch cuts that to ~10-20s and the cache pattern then
-    makes subsequent lookups near-instant.
+    Previously this function hit Playwright three times for data that all
+    came from the same StockNear page. On a cold container that meant
+    ~30-60s of serialized browser-driven scraping per first lookup.
+    Collapsing to a single chain fetch cuts that to ~10-20s and the cache
+    pattern then makes subsequent lookups near-instant.
 
     Returns dict with:
       current_price, price_change, price_change_percent (Yahoo),
