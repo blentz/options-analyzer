@@ -57,6 +57,16 @@ async def test_fetch_stock_overview_raises_no_data_on_empty_payload(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_fetch_stock_overview_keeps_missing_market_cap_as_none(monkeypatch):
+    """Absent marketCap must stay None, never the string "None"."""
+    _stub_call_tool(monkeypatch, {"AAPL": {"symbol": "AAPL", "price": 305.93}})
+
+    data = await fetch_stock_overview("AAPL")
+
+    assert data.market_cap is None
+
+
+@pytest.mark.asyncio
 async def test_fetch_expirations_returns_sorted_dates(monkeypatch):
     _stub_call_tool(monkeypatch, _load("options_overview_aapl.json"))
 
