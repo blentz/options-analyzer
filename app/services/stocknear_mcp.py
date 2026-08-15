@@ -11,6 +11,7 @@ tool payload arrives as a JSON string inside `result.content[0].text`. That
 is why this module needs no MCP SDK — httpx is enough.
 """
 
+import asyncio
 import json
 import logging
 from datetime import date
@@ -43,6 +44,14 @@ class StockNearMCPNoData(StockNearMCPError):
     """
 
 
+# Ceiling on simultaneous in-flight MCP requests. The Playwright path this
+# replaced was serialised by a semaphore of 1 because parallel Firefox
+# instances fought for memory; sub-second HTTP calls do not need a bound
+# that tight. They do need one, though — StockNear publishes no rate limit,
+# so without this N concurrent app requests become N concurrent MCP calls.
+_mcp_semaphore = asyncio.Semaphore(settings.stocknear_mcp_max_concurrency)
+
+
 def _make_client() -> httpx.AsyncClient:
     """Build the HTTP client.
 
@@ -62,7 +71,7 @@ async def _rpc(method: str, params: dict) -> dict:
     }
 
     try:
-        async with _make_client() as client:
+        async with _mcp_semaphore, _make_client() as client:
             response = await client.post(
                 settings.stocknear_mcp_url, json=payload, headers=headers
             )

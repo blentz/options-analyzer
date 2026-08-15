@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     stocknear_mcp_url: str = "https://mcp.stocknear.com/mcp"
     stocknear_mcp_token: str = ""
     stocknear_mcp_timeout: int = 30
+    # Max simultaneous in-flight MCP requests. StockNear publishes no rate
+    # limit, so this is a politeness bound as much as a protective one.
+    stocknear_mcp_max_concurrency: int = 4
     
     # Price service
     price_cache_ttl_seconds: int = 60  # 1 minute cache for stock prices

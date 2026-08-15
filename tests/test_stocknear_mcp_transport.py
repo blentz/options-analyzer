@@ -4,6 +4,7 @@ All HTTP is mocked through httpx.MockTransport — these tests never touch
 the network. The client factory `_make_client` is the monkeypatch seam.
 """
 
+import asyncio
 import json
 
 import httpx
@@ -172,3 +173,46 @@ async def test_content_as_string_raises_mcp_error(monkeypatch):
     _install_transport(monkeypatch, handler)
     with pytest.raises(StockNearMCPError):
         await call_tool("get_ticker_quote", {"tickers": ["AAPL"]})
+
+
+# --- Concurrency bound ---------------------------------------------------
+#
+# The scraper path this replaced funnelled through a semaphore of 1, so the
+# app could never hammer StockNear. Sub-second MCP calls do not need a bound
+# that tight, but they do need one: the spec records StockNear's rate limits
+# as undocumented, and N concurrent requests would otherwise mean N
+# concurrent MCP calls with nothing in the way.
+
+
+class _DepthTrackingTransport(httpx.AsyncBaseTransport):
+    """Records how many requests are ever in flight at the same moment."""
+
+    def __init__(self):
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def handle_async_request(self, request):
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)   # hold the slot so overlap is observable
+        self.in_flight -= 1
+        return _tool_response({"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_are_capped(monkeypatch):
+    transport = _DepthTrackingTransport()
+    monkeypatch.setattr(
+        stocknear_mcp, "_make_client",
+        lambda: httpx.AsyncClient(transport=transport),
+    )
+    monkeypatch.setattr(stocknear_mcp, "_mcp_semaphore", asyncio.Semaphore(2))
+
+    await asyncio.gather(*(
+        call_tool("get_ticker_quote", {"tickers": [f"S{i}"]}) for i in range(8)
+    ))
+
+    assert transport.max_in_flight <= 2, (
+        f"{transport.max_in_flight} concurrent MCP calls escaped the cap of 2"
+    )
+    assert transport.max_in_flight > 1, "test did not actually exercise concurrency"
