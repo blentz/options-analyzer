@@ -1,0 +1,70 @@
+{
+  "AAPL": {
+    "overview": {
+      "date": "August 15, 2026",
+      "currentIV": 33.65,
+      "ivRank": null,
+      "totalVolume": 419997,
+      "avgDailyVolume": 394665,
+      "putCallRatio": 0.43,
+      "sentiment": "bullish",
+      "totalOpenInterest": 4719412
+    },
+    "impliedVolatility": {
+      "current": 33.65,
+      "ivRank": null,
+      "ivPercentile": 0.0,
+      "historicalVolatility": 32.06,
+      "ivHigh": 53.14,
+      "ivLow": 35.22
+    },
+    "openInterest": {
+      "total": 4719412,
+      "calls": 2743811,
+      "puts": 1975601
+    },
+    "volume": {
+      "total": 419997,
+      "calls": 293010,
+      "puts": 126987
+    },
+    "table": [
+      {
+        "expiration": "2026-08-17",
+        "callVol": 95479.0,
+        "putVol": 40331.0,
+        "callOI": 24675.0,
+        "putOI": 11810.0,
+        "avgIV": 30.17,
+        "maxPain": 300.0
+      },
+      {
+        "expiration": "2026-08-19",
+        "callVol": 24892.0,
+        "putVol": 7253.0,
+        "callOI": 8337.0,
+        "putOI": 3029.0,
+        "avgIV": 32.71,
+        "maxPain": 302.5
+      },
+      {
+        "expiration": "2026-10-02",
+        "callVol": 1199.0,
+        "putVol": 430.0,
+        "callOI": 0,
+        "putOI": 0,
+        "avgIV": 25.29,
+        "maxPain": 0
+      },
+      {
+        "expiration": "2026-10-16",
+        "callVol": 9828.0,
+        "putVol": 3231.0,
+        "callOI": 262350.0,
+        "putOI": 143401.0,
+        "avgIV": 34.41,
+        "maxPain": 300.0
+      }
+    ]
+  }
+}

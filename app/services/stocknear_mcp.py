@@ -13,11 +13,13 @@ is why this module needs no MCP SDK — httpx is enough.
 
 import json
 import logging
+from datetime import date
 from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.stocknear_models import OptionsData
 
 logger = logging.getLogger(__name__)
 
@@ -98,3 +100,70 @@ async def call_tool(name: str, arguments: dict) -> Any:
                 ) from exc
 
     raise StockNearMCPError(f"MCP tool {name} returned no text content block")
+
+
+def _pct_to_decimal(value: float | None) -> float | None:
+    """Convert a percentage figure to a decimal fraction.
+
+    The MCP server reports volatility as a percentage (33.65). Everything in
+    this repo — risk_analysis, speculation_analysis, bs_math — expects a
+    decimal (0.3365). Getting this wrong inflates every Black-Scholes input
+    by 100x silently, so it lives in one named function with its own test.
+    """
+    if value is None:
+        return None
+    return value / 100
+
+
+def _select_max_pain(table: list[dict], today: date) -> float | None:
+    """Pick the max pain strike from the nearest expiry that still has one.
+
+    Rows whose `maxPain` is 0 mean the server has no figure for that expiry,
+    not that the strike is zero — skip them.
+    """
+    candidates = []
+    for row in table or []:
+        expiration = row.get("expiration")
+        max_pain = row.get("maxPain")
+        if not expiration or not max_pain:
+            continue
+        try:
+            if date.fromisoformat(expiration) >= today:
+                candidates.append((expiration, float(max_pain)))
+        except ValueError:
+            logger.debug("Skipping unparseable expiration %r", expiration)
+
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][1]
+
+
+def _require_symbol(payload: Any, symbol: str, tool: str) -> dict:
+    """Pull one symbol's object out of a tool payload, or signal no data."""
+    if not isinstance(payload, dict) or not payload.get(symbol):
+        raise StockNearMCPNoData(f"{tool} returned no data for {symbol}")
+    return payload[symbol]
+
+
+async def fetch_options_overview(symbol: str) -> OptionsData:
+    """Symbol-level options statistics: IV, HV, put/call ratio, volume, OI."""
+    symbol = symbol.upper()
+    payload = await call_tool("get_ticker_options_overview_data", {"tickers": [symbol]})
+    data = _require_symbol(payload, symbol, "get_ticker_options_overview_data")
+
+    overview = data.get("overview") or {}
+    volatility = data.get("impliedVolatility") or {}
+
+    return OptionsData(
+        symbol=symbol,
+        iv_rank=volatility.get("ivRank"),
+        iv_percentile=volatility.get("ivPercentile"),
+        implied_volatility=_pct_to_decimal(volatility.get("current")),
+        historical_volatility=_pct_to_decimal(volatility.get("historicalVolatility")),
+        put_call_ratio=overview.get("putCallRatio"),
+        total_volume=overview.get("totalVolume"),
+        total_open_interest=overview.get("totalOpenInterest"),
+        max_pain=_select_max_pain(data.get("table"), date.today()),
+        raw_content=json.dumps(data, default=str),
+    )
