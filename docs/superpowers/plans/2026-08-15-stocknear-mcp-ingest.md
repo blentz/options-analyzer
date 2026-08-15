@@ -1149,11 +1149,13 @@ git commit -m "feat: serve symbol-level StockNear data from MCP instead of the s
 
 Run:
 
+Grep for *calls on a scraper instance*, not for the bare names. `get_options_overview` and `get_max_pain` are also the names of service-layer functions in `stocknear_service.py` that are staying — a bare-name grep hits those and `app/main.py`'s imports of them, which is noise, not a problem.
+
 ```bash
-grep -rn 'get_options_overview\|get_max_pain\|get_stock_overview\|get_available_expirations\|get_options_flow\|get_dark_pool\|get_analyst_ratings\|get_options_gex\|get_options_dex' --include='*.py' app/ tests/
+grep -rn 'scraper\.\(get_options_overview\|get_max_pain\|get_stock_overview\|get_available_expirations\|get_options_flow\|get_dark_pool\|get_analyst_ratings\|get_options_gex\|get_options_dex\)' --include='*.py' app/ tests/
 ```
 
-Expected: hits only inside `app/stocknear.py` (the definitions and the `main()` CLI) and in `app/services/stocknear_mcp.py` / `stocknear_service.py` where the names refer to the MCP fetchers. Any other hit means a caller was missed — resolve it before deleting.
+Expected: hits only inside `app/stocknear.py`'s `main()` CLI, which Step 3 rewrites. A hit anywhere else means a caller was missed — resolve it before deleting.
 
 - [ ] **Step 2: Delete the superseded scraper methods**
 
