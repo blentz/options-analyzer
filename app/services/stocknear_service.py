@@ -112,6 +112,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import StockNearCache
 from app.stocknear import StockNearScraper, OptionsData, StockData, OptionsChain, OptionContract, ContractQuote
+from app.services.stocknear_mcp import (
+    StockNearMCPError,
+    StockNearMCPNoData,
+    fetch_expirations,
+    fetch_options_overview,
+    fetch_stock_overview,
+)
 
 
 @dataclass
@@ -224,29 +231,6 @@ async def cleanup_expired_cache(db: AsyncSession) -> int:
     return result.rowcount
 
 
-def _fetch_options_overview_sync(symbol: str) -> dict:
-    """Synchronous fetch of options overview - runs in thread pool.
-
-    Uses the persistent browser context so a hot app doesn't pay the
-    3-5s Firefox launch cost on every call.
-    """
-    scraper = _get_or_start_persistent_scraper()
-    data = scraper.get_options_overview(symbol)
-    return asdict(data)
-
-
-def _fetch_max_pain_sync(symbol: str) -> dict:
-    scraper = _get_or_start_persistent_scraper()
-    data = scraper.get_max_pain(symbol)
-    return asdict(data)
-
-
-def _fetch_stock_overview_sync(symbol: str) -> dict:
-    scraper = _get_or_start_persistent_scraper()
-    data = scraper.get_stock_overview(symbol)
-    return asdict(data)
-
-
 async def get_options_overview(
     db: AsyncSession,
     symbol: str,
@@ -285,7 +269,7 @@ async def get_options_overview(
     # Fetch fresh data in thread pool
     logger.info("Fetching fresh options overview for %s (force_refresh=%s, has_expired_cache=%s)", symbol, force_refresh, cached is not None)
     try:
-        fresh_dict = await run_scraper(_fetch_options_overview_sync, symbol)
+        fresh_dict = asdict(await fetch_options_overview(symbol))
         
         # Log what we got from the scraper
         fresh_iv = fresh_dict.get('implied_volatility')
@@ -349,7 +333,10 @@ async def get_max_pain(
     
     logger.info("Fetching fresh max pain for %s", symbol)
     try:
-        data_dict = await run_scraper(_fetch_max_pain_sync, symbol)
+        # Max pain rides along on the options-overview payload — one MCP
+        # call serves both. asdict keeps the cached shape identical to what
+        # the scraper wrote, so pre-existing rows stay readable.
+        data_dict = asdict(await fetch_options_overview(symbol))
         await set_cached_data(db, cache_key, "max_pain", symbol, data_dict)
         logger.debug("Max pain for %s: %s", symbol, data_dict.get("max_pain"))
         return data_dict.get("max_pain")
@@ -380,7 +367,7 @@ async def get_stock_data(
     
     logger.info("Fetching fresh stock data for %s", symbol)
     try:
-        data_dict = await run_scraper(_fetch_stock_overview_sync, symbol)
+        data_dict = asdict(await fetch_stock_overview(symbol))
         await set_cached_data(db, cache_key, "stock_overview", symbol, data_dict)
         return StockData(**data_dict)
     except Exception as e:
@@ -521,12 +508,6 @@ def _fetch_options_chain_sync(symbol: str) -> dict:
     }
 
 
-def _fetch_expirations_sync(symbol: str) -> list[str]:
-    """Synchronous fetch of available expirations - runs in thread pool."""
-    scraper = _get_or_start_persistent_scraper()
-    return scraper.get_available_expirations(symbol)
-
-
 async def get_options_chain(
     db: AsyncSession,
     symbol: str,
@@ -625,7 +606,7 @@ async def get_available_expirations(
     
     logger.info("Fetching fresh expirations for %s", symbol)
     try:
-        expirations = await run_scraper(_fetch_expirations_sync, symbol)
+        expirations = await fetch_expirations(symbol)
         await set_cached_data(db, cache_key, "expirations", symbol, {"expirations": expirations})
         logger.debug("Got %d expirations for %s", len(expirations), symbol)
         return expirations
