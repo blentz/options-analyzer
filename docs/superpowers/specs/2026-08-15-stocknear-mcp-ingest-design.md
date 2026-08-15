@@ -227,14 +227,39 @@ Development is test-first. All tests mock `httpx`; none reach the network.
 
 ## Risks
 
-**`ivRank` is frequently null.** The probe returned null for AAPL. This value
-feeds the IV-rank display on the risk page but not any pricing calculation, so
-the field renders blank rather than producing a wrong number.
+**`ivRank` is unreliable in two distinct ways.** It feeds the IV-rank display
+on the risk page but no pricing calculation, so neither failure affects
+valuations.
+
+A broader probe on 2026-08-15 settled the scale question and uncovered the
+second failure mode. StockNear derives the value as
+`(current - ivLow) / (ivHigh - ivLow) * 100`, which reproduces its output
+exactly — GME returned 17.66 from current 73.11, low 54.83, high 158.33 — so
+the field is on a 0-100 scale and needs no conversion.
+
+*Null:* the server returns null rather than a negative rank whenever
+`current < ivLow`, which was the case for AAPL, SPY, TSLA and T. Null is
+handled by rendering the field blank, and `iv_rank` is exempt from the
+service layer's null-preserve merge rule so a null never inherits a stale
+value.
+
+*Wrong but not null:* `ivHigh` is sometimes corrupt upstream — the same probe
+saw 13482% (NVDA), 21947% (MSTR), 54297% (F) and 358042% (AMC). The division
+still succeeds against a corrupt high, so the rank arrives as a
+plausible-looking near-zero. Ford returned `ivRank` 0.03 beside
+`ivPercentile` 73.83, the two disagreeing about where IV sits by seventy
+points. `_plausible_iv_rank` discards the rank when `ivHigh` exceeds
+`MAX_PLAUSIBLE_IV_PCT` (1000%), well above any real equity reading and well
+below the smallest corrupt one. `ivPercentile` is computed independently and
+is left alone.
 
 **MCP rate limits are undocumented.** The server publishes no limit and the
-probe did not exercise one. The existing cache TTL of one hour bounds request
-volume, but a limit encountered in practice will surface as an HTTP error and
-degrade to stale cache.
+probe did not exercise one. Three things bound request volume: the existing
+one-hour cache TTL, a transport-level semaphore capping simultaneous in-flight
+requests (`STOCKNEAR_MCP_MAX_CONCURRENCY`, default 4, replacing the ceiling
+the scraper's semaphore-of-1 used to provide implicitly), and max pain sharing
+the options-overview fetch rather than issuing its own. A limit encountered in
+practice will still surface as an HTTP error and degrade to stale cache.
 
 **Credential exposure.** The bearer token currently lives in
 `~/.claude.json`. Moving it into the application's `.env` widens the number of
