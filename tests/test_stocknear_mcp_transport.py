@@ -122,7 +122,20 @@ async def test_jsonrpc_error_response_raises(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_http_error_raises(monkeypatch):
-    _install_transport(monkeypatch, lambda request: httpx.Response(403, text="denied"))
+    """A 403 must fail on its status, not incidentally on an unparseable body.
+
+    The body here is deliberately valid JSON in the shape of a successful
+    response. If raise_for_status() were ever dropped, this would sail past
+    the JSON decode and return {"AAPL": ...} instead of raising — which a
+    body of "denied" would have masked, since that fails to parse anyway.
+    """
+    _install_transport(monkeypatch, lambda request: httpx.Response(
+        403,
+        json={"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": '{"AAPL": {"price": 1.0}}'}],
+            "isError": False,
+        }},
+    ))
 
     with pytest.raises(StockNearMCPError):
         await call_tool("get_ticker_quote", {"tickers": ["AAPL"]})

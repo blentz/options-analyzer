@@ -23,7 +23,7 @@ from app.database import get_db
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
 @router.get("/stocknear/{symbol}")
-async def debug_stocknear(symbol: str, db: AsyncSession = Depends(get_db)):
+async def debug_stocknear(symbol: str):
     """
     Debug endpoint to view the raw MCP payloads behind a symbol's data.
 

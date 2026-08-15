@@ -15,14 +15,32 @@ from app.stocknear_models import OptionsData
 
 @pytest.fixture
 def fake_cache(monkeypatch):
-    """Replace the DB-backed cache helpers with a dict."""
-    store: dict[str, dict] = {}
+    """Replace the DB-backed cache helpers with a dict.
+
+    Entries live in `store` and are fresh by default. Marking a key expired
+    via `store.expire(key)` makes it visible only to `include_expired=True`
+    reads, which is the distinction the merge logic exists to serve — a fake
+    that returned every row to both kinds of read would let a fresh-vs-stale
+    test pass without proving anything.
+    """
+    class _Store(dict):
+        def __init__(self):
+            super().__init__()
+            self.expired: set[str] = set()
+
+        def expire(self, key: str) -> None:
+            self.expired.add(key)
+
+    store = _Store()
 
     async def get_cached_data(db, cache_key, include_expired=False):
+        if cache_key in store.expired and not include_expired:
+            return None
         return store.get(cache_key)
 
     async def set_cached_data(db, cache_key, data_type, symbol, data, ttl_seconds=None):
         store[cache_key] = data
+        store.expired.discard(cache_key)
 
     monkeypatch.setattr(stocknear_service, "get_cached_data", get_cached_data)
     monkeypatch.setattr(stocknear_service, "set_cached_data", set_cached_data)
@@ -231,3 +249,54 @@ async def test_get_enriched_quote_takes_max_pain_from_the_same_payload(
     assert quote.max_pain == 250.0
     assert quote.implied_volatility == pytest.approx(0.31)
     assert calls == ["AAPL"], f"expected one upstream fetch, got {len(calls)}"
+
+
+@pytest.mark.asyncio
+async def test_expired_cache_triggers_a_refetch_rather_than_being_served(
+    monkeypatch, fake_cache
+):
+    """The fresh-vs-expired distinction, which the old fake could not express."""
+    fake_cache["options_overview:AAPL"] = {
+        "symbol": "AAPL", "implied_volatility": 0.30, "iv_rank": None,
+        "iv_percentile": None, "historical_volatility": None,
+        "put_call_ratio": None, "total_volume": None,
+        "total_open_interest": None, "max_pain": None, "raw_content": "",
+    }
+    fake_cache.expire("options_overview:AAPL")
+
+    calls = []
+
+    async def counting_fetch(symbol):
+        calls.append(symbol)
+        return OptionsData(symbol=symbol, implied_volatility=0.42)
+
+    monkeypatch.setattr(stocknear_service, "fetch_options_overview", counting_fetch)
+
+    result = await stocknear_service.get_options_overview(db=None, symbol="AAPL")
+
+    assert calls == ["AAPL"], "expired cache must not be served as fresh"
+    assert result.implied_volatility == pytest.approx(0.42)
+
+
+@pytest.mark.asyncio
+async def test_fresh_cache_is_served_without_a_refetch(monkeypatch, fake_cache):
+    """The other side of the same distinction."""
+    fake_cache["options_overview:AAPL"] = {
+        "symbol": "AAPL", "implied_volatility": 0.30, "iv_rank": None,
+        "iv_percentile": None, "historical_volatility": None,
+        "put_call_ratio": None, "total_volume": None,
+        "total_open_interest": None, "max_pain": None, "raw_content": "",
+    }
+
+    calls = []
+
+    async def counting_fetch(symbol):
+        calls.append(symbol)
+        return OptionsData(symbol=symbol, implied_volatility=0.42)
+
+    monkeypatch.setattr(stocknear_service, "fetch_options_overview", counting_fetch)
+
+    result = await stocknear_service.get_options_overview(db=None, symbol="AAPL")
+
+    assert calls == [], "fresh cache must not trigger an upstream call"
+    assert result.implied_volatility == pytest.approx(0.30)

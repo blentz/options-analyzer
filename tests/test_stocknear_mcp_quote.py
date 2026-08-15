@@ -115,3 +115,14 @@ async def test_fetch_expirations_filters_past_expiries(monkeypatch):
     ]}})
 
     assert await fetch_expirations("AAPL") == ["2099-01-15"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_stock_overview_stores_raw_payload(monkeypatch):
+    """raw_content backs the debug endpoint, so it must round-trip as JSON."""
+    payload = _load("quote_aapl.json")
+    _stub_call_tool(monkeypatch, payload)
+
+    data = await fetch_stock_overview("AAPL")
+
+    assert json.loads(data.raw_content) == payload["AAPL"]
