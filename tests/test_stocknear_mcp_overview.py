@@ -151,3 +151,20 @@ async def test_fetch_options_overview_raises_no_data_when_symbol_key_absent(monk
 
     with pytest.raises(StockNearMCPNoData):
         await fetch_options_overview("AAPL")
+
+
+@pytest.mark.asyncio
+async def test_fetch_options_overview_selects_max_pain_from_table(monkeypatch):
+    """Pins the table->_select_max_pain wiring, including the zero-skip.
+
+    Uses far-future expiries rather than the AAPL fixture's real dates so
+    the assertion cannot start failing once those expiries pass.
+    """
+    _stub_call_tool(monkeypatch, {"AAPL": {"table": [
+        {"expiration": "2099-01-15", "maxPain": 0},
+        {"expiration": "2099-02-19", "maxPain": 250.0},
+    ]}})
+
+    data = await fetch_options_overview("AAPL")
+
+    assert data.max_pain == 250.0
