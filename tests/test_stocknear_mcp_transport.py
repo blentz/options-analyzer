@@ -137,3 +137,38 @@ async def test_missing_text_content_raises(monkeypatch):
     _install_transport(monkeypatch, handler)
     with pytest.raises(StockNearMCPError):
         await call_tool("get_ticker_quote", {"tickers": ["AAPL"]})
+
+
+@pytest.mark.asyncio
+async def test_top_level_json_list_raises_mcp_error(monkeypatch):
+    """A valid-JSON-but-wrong-shape response (list instead of object) must
+    surface as StockNearMCPError, not an AttributeError from body.get(...)
+    on a list — the router only catches StockNearMCPError.
+    """
+    def handler(request):
+        return httpx.Response(200, json=[1, 2, 3])
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(StockNearMCPError):
+        await call_tool("get_ticker_quote", {"tickers": ["AAPL"]})
+
+
+@pytest.mark.asyncio
+async def test_content_as_string_raises_mcp_error(monkeypatch):
+    """result.content being a bare string (instead of a list of blocks)
+    would otherwise iterate its characters and fail deep inside with an
+    AttributeError on block.get(...). Must surface as StockNearMCPError.
+    """
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"content": "not a list", "isError": False},
+            },
+        )
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(StockNearMCPError):
+        await call_tool("get_ticker_quote", {"tickers": ["AAPL"]})

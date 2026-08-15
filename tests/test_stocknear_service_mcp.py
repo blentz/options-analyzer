@@ -75,7 +75,48 @@ async def test_get_options_overview_falls_back_to_cache_on_mcp_failure(
 async def test_get_options_overview_preserves_cached_value_when_fresh_is_null(
     monkeypatch, fake_cache
 ):
-    """The merge behavior that keeps last-known values across a closed market."""
+    """The merge behavior that keeps last-known values across a closed market.
+
+    iv_rank is deliberately NOT used as the example field here — it is
+    exempted from this preserve behavior (see the exemption test below)
+    because the MCP server returns it null most of the time, which would
+    otherwise pin a pre-migration scraped value in place forever.
+    """
+    fake_cache["options_overview:AAPL"] = {
+        "symbol": "AAPL",
+        "implied_volatility": 0.30,
+        "iv_rank": None,
+        "iv_percentile": None,
+        "historical_volatility": None,
+        "put_call_ratio": 0.85,
+        "total_volume": None,
+        "total_open_interest": None,
+        "max_pain": None,
+        "raw_content": "",
+    }
+
+    async def fake_fetch(symbol):
+        return OptionsData(symbol=symbol, implied_volatility=0.35, put_call_ratio=None)
+
+    monkeypatch.setattr(stocknear_service, "fetch_options_overview", fake_fetch)
+
+    result = await stocknear_service.get_options_overview(
+        db=None, symbol="AAPL", force_refresh=True
+    )
+
+    assert result.implied_volatility == 0.35
+    assert result.put_call_ratio == 0.85
+
+
+@pytest.mark.asyncio
+async def test_get_options_overview_clears_iv_rank_when_fresh_is_null(
+    monkeypatch, fake_cache
+):
+    """iv_rank is exempted from the null-preserve merge rule: a null fresh
+    value must clear it rather than freezing a pre-migration scraped value
+    in place forever with its TTL reset on every write. A blank IV Rank is
+    honest; a frozen one is not.
+    """
     fake_cache["options_overview:AAPL"] = {
         "symbol": "AAPL",
         "implied_volatility": 0.30,
@@ -98,8 +139,7 @@ async def test_get_options_overview_preserves_cached_value_when_fresh_is_null(
         db=None, symbol="AAPL", force_refresh=True
     )
 
-    assert result.implied_volatility == 0.35
-    assert result.iv_rank == 40.0
+    assert result.iv_rank is None
 
 
 @pytest.mark.asyncio

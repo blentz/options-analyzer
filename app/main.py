@@ -222,6 +222,12 @@ if app_settings.enable_debug_endpoints:
     logging.getLogger(__name__).warning(
         "ENABLE_DEBUG_ENDPOINTS=true — /api/debug/* exposed (raw scraped data)."
     )
+if not app_settings.stocknear_mcp_token:
+    logging.getLogger(__name__).warning(
+        "STOCKNEAR_MCP_TOKEN is empty — symbol-level StockNear data (IV, "
+        "options overview, max pain) will fail on every fetch and silently "
+        "degrade to cache. Set stocknear_mcp_token in .env."
+    )
 
 # Templates
 templates_dir = Path(__file__).parent.parent / "templates"

@@ -101,3 +101,17 @@ async def test_fetch_expirations_raises_no_data_on_empty_payload(monkeypatch):
 
     with pytest.raises(StockNearMCPNoData):
         await fetch_expirations("ZZZZNOTREAL")
+
+
+@pytest.mark.asyncio
+async def test_fetch_expirations_filters_past_expiries(monkeypatch):
+    """The server is not trusted to have already dropped past expiries —
+    same defensive assumption as _select_max_pain. Far-past/far-future
+    dates so this test cannot rot with the passage of time.
+    """
+    _stub_call_tool(monkeypatch, {"AAPL": {"table": [
+        {"expiration": "2020-01-17"},
+        {"expiration": "2099-01-15"},
+    ]}})
+
+    assert await fetch_expirations("AAPL") == ["2099-01-15"]

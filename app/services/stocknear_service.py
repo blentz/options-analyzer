@@ -1,7 +1,10 @@
 """
 Async service for fetching and caching StockNear data.
 
-This service wraps the synchronous StockNear scraper and provides:
+This service orchestrates caching over two sources — the MCP client for
+symbol-level data (options overview, max pain, stock quote, expirations)
+and the synchronous Playwright scraper for contract-level quotes — and
+provides:
 - Async interface for FastAPI integration
 - Database-backed caching with configurable TTL
 - Thread pool execution for the sync scraper
@@ -39,6 +42,14 @@ _persistent_started_at: float = 0.0
 _persistent_request_count: int = 0
 _PERSISTENT_MAX_AGE_SECONDS = 60 * 60       # 1 hour
 _PERSISTENT_MAX_REQUESTS = 200              # rotate after 200 calls
+
+
+# Fields that must NOT inherit a cached value when the fresh fetch returns
+# null. The merge below exists to ride out transient nulls (markets closed),
+# but StockNear's MCP server returns ivRank as null most of the time, so
+# preserving it would pin a pre-migration scraped value in place forever with
+# its TTL reset on every write. A blank IV Rank is honest; a frozen one is not.
+NEVER_PRESERVE_ON_NULL = frozenset({"iv_rank"})
 
 
 def _get_or_start_persistent_scraper():
@@ -238,8 +249,8 @@ async def get_options_overview(
     Get options overview data for a symbol.
     
     Uses database cache with 1-hour TTL.
-    Falls back to live scrape if cache miss.
-    
+    Falls back to a live MCP fetch if cache miss.
+
     IMPORTANT: When fetching fresh data, merges with cached data to preserve
     last-known values for fields that come back null (e.g., when markets closed).
     
@@ -264,12 +275,12 @@ async def get_options_overview(
     # Get any cached data (including expired) for merging with fresh data
     cached = await get_cached_data(db, cache_key, include_expired=True)
     
-    # Fetch fresh data in thread pool
+    # Fetch fresh data via the MCP client
     logger.info("Fetching fresh options overview for %s (force_refresh=%s, has_expired_cache=%s)", symbol, force_refresh, cached is not None)
     try:
         fresh_dict = asdict(await fetch_options_overview(symbol))
-        
-        # Log what we got from the scraper
+
+        # Log what we got from the MCP fetch
         fresh_iv = fresh_dict.get('implied_volatility')
         fresh_iv_rank = fresh_dict.get('iv_rank')
         logger.debug(
@@ -286,6 +297,8 @@ async def get_options_overview(
                     if cached.get(key) != value:
                         merged_fields.append(f"{key}: {cached.get(key)} -> {value}")
                     merged_dict[key] = value  # Only overwrite if fresh value is not null
+                elif value is None and key in NEVER_PRESERVE_ON_NULL:
+                    merged_dict[key] = None  # Clear rather than freeze a stale scraped value
                 elif value is None and cached.get(key) is not None:
                     logger.debug("Preserving cached %s=%s (fresh was null)", key, cached.get(key))
             # Always update raw_content if present

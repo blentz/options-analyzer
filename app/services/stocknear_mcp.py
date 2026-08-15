@@ -73,6 +73,9 @@ async def _rpc(method: str, params: dict) -> dict:
     except ValueError as exc:
         raise StockNearMCPError(f"MCP returned malformed JSON for {method}: {exc}") from exc
 
+    if not isinstance(body, dict):
+        raise StockNearMCPError(f"MCP response for {method} is not a JSON object")
+
     if "error" in body:
         raise StockNearMCPError(f"MCP error for {method}: {body['error']}")
 
@@ -91,6 +94,10 @@ async def call_tool(name: str, arguments: dict) -> Any:
         raise StockNearMCPError(f"MCP tool {name} reported an error: {result.get('content')}")
 
     for block in result.get("content", []):
+        if not isinstance(block, dict):
+            raise StockNearMCPError(
+                f"MCP tool {name} returned a non-object content block: {block!r}"
+            )
         if block.get("type") == "text":
             try:
                 return json.loads(block["text"])
@@ -191,16 +198,24 @@ async def fetch_stock_overview(symbol: str) -> StockData:
 async def fetch_expirations(symbol: str) -> list[str]:
     """Available option expiration dates, ascending ISO strings.
 
-    Derived from the options-overview expiry table, which the server already
-    filters to future expiries.
+    Derived from the options-overview expiry table. We do not trust the
+    server to have already filtered out past expiries — same defensive
+    assumption as `_select_max_pain` — so rows before today are dropped here.
     """
     symbol = symbol.upper()
     payload = await call_tool("get_ticker_options_overview_data", {"tickers": [symbol]})
     data = _require_symbol(payload, symbol, "get_ticker_options_overview_data")
 
-    expirations = {
-        row["expiration"]
-        for row in data.get("table") or []
-        if row.get("expiration")
-    }
+    today = date.today()
+    expirations = set()
+    for row in data.get("table") or []:
+        expiration = row.get("expiration")
+        if not expiration:
+            continue
+        try:
+            if date.fromisoformat(expiration) >= today:
+                expirations.add(expiration)
+        except ValueError:
+            logger.debug("Skipping unparseable expiration %r", expiration)
+
     return sorted(expirations)
