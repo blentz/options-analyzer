@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.stocknear_models import OptionsData
+from app.stocknear_models import OptionsData, StockData
 
 logger = logging.getLogger(__name__)
 
@@ -167,3 +167,40 @@ async def fetch_options_overview(symbol: str) -> OptionsData:
         max_pain=_select_max_pain(data.get("table"), date.today()),
         raw_content=json.dumps(data, default=str),
     )
+
+
+async def fetch_stock_overview(symbol: str) -> StockData:
+    """Latest stock quote: price, change, market cap, volume."""
+    symbol = symbol.upper()
+    payload = await call_tool("get_ticker_quote", {"tickers": [symbol]})
+    data = _require_symbol(payload, symbol, "get_ticker_quote")
+
+    market_cap = data.get("marketCap")
+
+    return StockData(
+        symbol=symbol,
+        price=data.get("price"),
+        change=data.get("change"),
+        change_percent=data.get("changesPercentage"),
+        market_cap=str(market_cap) if market_cap is not None else None,
+        volume=data.get("volume"),
+        raw_content=json.dumps(data, default=str),
+    )
+
+
+async def fetch_expirations(symbol: str) -> list[str]:
+    """Available option expiration dates, ascending ISO strings.
+
+    Derived from the options-overview expiry table, which the server already
+    filters to future expiries.
+    """
+    symbol = symbol.upper()
+    payload = await call_tool("get_ticker_options_overview_data", {"tickers": [symbol]})
+    data = _require_symbol(payload, symbol, "get_ticker_options_overview_data")
+
+    expirations = {
+        row["expiration"]
+        for row in data.get("table") or []
+        if row.get("expiration")
+    }
+    return sorted(expirations)
