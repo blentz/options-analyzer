@@ -9,6 +9,7 @@ integration suite.
 import pytest
 
 from app.services import stocknear_service
+from app.services.stocknear_mcp import StockNearMCPError, StockNearMCPNoData
 from app.stocknear_models import OptionsData
 
 
@@ -59,7 +60,7 @@ async def test_get_options_overview_falls_back_to_cache_on_mcp_failure(
     }
 
     async def boom(symbol):
-        raise stocknear_service.StockNearMCPError("server down")
+        raise StockNearMCPError("server down")
 
     monkeypatch.setattr(stocknear_service, "fetch_options_overview", boom)
 
@@ -104,7 +105,7 @@ async def test_get_options_overview_preserves_cached_value_when_fresh_is_null(
 @pytest.mark.asyncio
 async def test_get_max_pain_returns_none_on_no_data(monkeypatch, fake_cache):
     async def boom(symbol):
-        raise stocknear_service.StockNearMCPNoData("unknown symbol")
+        raise StockNearMCPNoData("unknown symbol")
 
     monkeypatch.setattr(stocknear_service, "fetch_options_overview", boom)
 
@@ -115,7 +116,7 @@ async def test_get_max_pain_returns_none_on_no_data(monkeypatch, fake_cache):
 async def test_get_max_pain_does_not_cache_on_no_data(monkeypatch, fake_cache):
     """A missing symbol must not write an empty row over good data."""
     async def boom(symbol):
-        raise stocknear_service.StockNearMCPNoData("unknown symbol")
+        raise StockNearMCPNoData("unknown symbol")
 
     monkeypatch.setattr(stocknear_service, "fetch_options_overview", boom)
     await stocknear_service.get_max_pain(db=None, symbol="ZZZZ")

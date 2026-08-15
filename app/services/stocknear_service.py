@@ -113,8 +113,6 @@ from app.config import settings
 from app.models import StockNearCache
 from app.stocknear import StockNearScraper, OptionsData, StockData, OptionsChain, OptionContract, ContractQuote
 from app.services.stocknear_mcp import (
-    StockNearMCPError,
-    StockNearMCPNoData,
     fetch_expirations,
     fetch_options_overview,
     fetch_stock_overview,

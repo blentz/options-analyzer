@@ -37,6 +37,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-ra --strict-markers --tb=short"
 filterwarnings = ["ignore::DeprecationWarning"]
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 python_version = "3.12"
