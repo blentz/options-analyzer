@@ -97,9 +97,13 @@ Fetchers, each returning the dataclass the application already uses:
 ```
 async def fetch_options_overview(symbol: str) -> OptionsData
 async def fetch_stock_overview(symbol: str) -> StockData
-async def fetch_max_pain(symbol: str) -> float | None
 async def fetch_expirations(symbol: str) -> list[str]
 ```
+
+Max pain needs no fetcher of its own: it is a field on the `OptionsData` that
+`fetch_options_overview` already returns, and the service layer caches that
+whole object. Selecting it from the expiry table is a separate tested helper,
+`_select_max_pain`.
 
 Each raises `StockNearMCPNoData` when the payload for the requested symbol is
 empty, so that a missing symbol never overwrites a populated cache entry with
