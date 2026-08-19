@@ -132,7 +132,15 @@ def _int(raw: str) -> Optional[int]:
         return None
     try:
         # Some counts arrive as "4.0"; int("4.0") raises.
-        return int(float(raw.strip()))
+        cleaned = raw.strip()
+        parsed = float(cleaned)
+        truncated = int(parsed)
+        if parsed != truncated:
+            logger.warning(
+                "Truncating non-integral count value %r to %d",
+                cleaned, truncated
+            )
+        return truncated
     except ValueError:
         return None
 

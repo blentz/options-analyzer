@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from app.services.contract_history import HistoryRow, parse_history_csv
+from app.services.contract_history import (
+    ContractHistoryParseError,
+    HistoryRow,
+    parse_history_csv,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "contract_history" / "HITI261016P00002500.csv"
 
@@ -103,3 +107,49 @@ class TestSourceAnomalyPinned:
 
         assert feb20.volume is None
         assert feb20.open_interest == 4
+
+
+class TestNonIntegralCountTruncation:
+    """Non-integral count values are truncated with a warning."""
+
+    def test_truncates_and_warns(self, tmp_path, caplog):
+        """A non-integral count (e.g. '4.7') is truncated to int with a logged warning."""
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest\n"
+            "2026-08-19,0.3,0.3,0.3,0.3,4.7,3784\n"
+        )
+
+        rows = parse_history_csv(csv_file)
+        assert len(rows) == 1
+        assert rows[0].volume == 4
+        assert "Truncating non-integral count value '4.7' to 4" in caplog.text
+
+
+class TestMissingDateColumn:
+    """CSV with no date column raises ContractHistoryParseError."""
+
+    def test_raises_on_missing_date_column(self, tmp_path):
+        """CSV with no date column raises ContractHistoryParseError."""
+        csv_file = tmp_path / "no_date.csv"
+        csv_file.write_text(
+            "open,high,low,close,volume,open_interest\n"
+            "0.3,0.3,0.3,0.3,1,3784\n"
+        )
+
+        with pytest.raises(ContractHistoryParseError, match="no 'date' column"):
+            parse_history_csv(csv_file)
+
+
+class TestHeaderOnlyCSV:
+    """Header-only CSV with no data rows raises ContractHistoryParseError."""
+
+    def test_raises_on_header_only(self, tmp_path):
+        """CSV with only headers and no data rows raises ContractHistoryParseError."""
+        csv_file = tmp_path / "header_only.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest\n"
+        )
+
+        with pytest.raises(ContractHistoryParseError, match="contained no parseable rows"):
+            parse_history_csv(csv_file)
