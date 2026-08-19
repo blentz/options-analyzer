@@ -29,6 +29,8 @@ from app.stocknear_models import (
     OptionsChain,
     OptionsData,
     StockData,
+    DownloadTimeoutError,
+    verify_contract_served,
 )
 from app.stocknear_cookies import extract_browser_cookies
 
@@ -78,7 +80,12 @@ class StockNearScraper:
 
         # Launch fresh browser, then inject cookies from profile
         browser = self.playwright.firefox.launch(headless=self.headless)
-        self.context = browser.new_context(viewport={"width": 1280, "height": 800})
+        # accept_downloads is required for expect_download() to fire; without it
+        # Playwright cancels the download and the event never arrives.
+        self.context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            accept_downloads=True,
+        )
 
         # Extract and add cookies if profile path is configured
         if self.profile_path:
@@ -924,6 +931,53 @@ class StockNearScraper:
         success_count = sum(1 for q in results if q.bid is not None or q.last is not None)
         logger.info("API batch complete: %d/%d quotes with data", success_count, len(results))
         return results
+
+    def download_contract_history(
+        self, symbol: str, occ_symbol: str, dest_dir: Path
+    ) -> Path:
+        """Download one contract's full history CSV.
+
+        Args:
+            symbol: Underlying ticker, e.g. "HITI". Taken from the caller
+                rather than parsed off occ_symbol — splitting an OCC
+                symbol on its date component is ambiguous for tickers
+                containing digits.
+            occ_symbol: e.g. "HITI261016P00002500"
+            dest_dir: Directory to save into. Must exist.
+
+        Returns the saved file path.
+
+        Raises ProGatedError, AuthExpiredError, or DownloadTimeoutError.
+        """
+        self._rate_limit()
+        url = (
+            f"{self.base_url}/stocks/{symbol.upper()}"
+            f"/options/contract-lookup?contract={occ_symbol}"
+        )
+        logger.info("Downloading contract history for %s", occ_symbol)
+        self.page.goto(url, wait_until="networkidle")
+
+        # Must run before any data is read. A substituted contract returns
+        # HTTP 200 with a valid CSV for the wrong contract.
+        verify_contract_served(occ_symbol, self.page.url, self.page.inner_text("body"))
+
+        try:
+            # The Download control only opens a menu; the CSV item is
+            # inside it. Two clicks are required — clicking Download alone
+            # does not trigger a download.
+            self.page.get_by_role("button", name="Download").click()
+            with self.page.expect_download(timeout=30000) as download_info:
+                self.page.get_by_role("menuitem", name="Download to CSV").click()
+            download = download_info.value
+        except Exception as e:
+            raise DownloadTimeoutError(
+                f"Download failed for {occ_symbol}: {e}"
+            ) from e
+
+        dest = dest_dir / f"{occ_symbol}.csv"
+        download.save_as(str(dest))
+        logger.info("Saved %s", dest)
+        return dest
 
     def get_available_strikes(self, symbol: str, return_raw_html: bool = False) -> dict:
         """
