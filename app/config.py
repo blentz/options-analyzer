@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     stocknear_rate_limit_delay: float = 1.0  # Seconds between requests
     stocknear_cache_ttl_seconds: int = 3600  # 1 hour cache
 
+    # Contract-history sync. The source updates once per trading day; 12
+    # hours fetches each day's data about once without needing a market
+    # calendar. Sync is user-triggered, so this only suppresses redundant
+    # re-downloads within a session of clicking.
+    stocknear_history_ttl_seconds: int = 43200
+
     # StockNear MCP server. Symbol-level data (options overview, max pain,
     # stock quote, expirations) comes from here rather than the scraper.
     # The token is a credential — set it in .env, never commit it.

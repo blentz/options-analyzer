@@ -5,10 +5,13 @@ can be tested without a browser. Browser work lives on StockNearScraper;
 see docs/superpowers/specs/2026-08-19-contract-history-download-design.md.
 """
 
+import asyncio
 import csv
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass, fields
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
@@ -16,7 +19,9 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ContractHistory
+from app.config import settings
+from app.models import ContractHistory, ContractHistorySync, OptionContract, OptionPosition
+from app.stocknear_models import ContractHistoryError
 
 logger = logging.getLogger(__name__)
 
@@ -251,3 +256,180 @@ async def upsert_history(
             setattr(target, name, getattr(row, name))
 
     return len(rows)
+
+
+@dataclass
+class SyncError:
+    contract: str          # OCC symbol
+    error: str
+
+
+@dataclass
+class SyncSummary:
+    contracts_total: int = 0
+    synced: int = 0
+    skipped: int = 0
+    failed: int = 0
+    rows_upserted: int = 0
+    errors: list = None
+
+    def __post_init__(self):
+        if self.errors is None:
+            self.errors = []
+
+
+def occ_symbol(contract: OptionContract) -> str:
+    """Build the OCC symbol Stocknear's contract-lookup URL expects.
+
+    Mirrors StockNearScraper._build_contract_id, reimplemented here rather
+    than imported because that module pulls in Playwright.
+    """
+    type_char = "P" if contract.option_type.upper() == "PUT" else "C"
+    strike_int = int(Decimal(str(contract.strike)) * 1000)
+    return (
+        f"{contract.symbol.upper()}"
+        f"{contract.expiration.strftime('%y%m%d')}"
+        f"{type_char}{strike_int:08d}"
+    )
+
+
+def _retain_failed_download(path: Path, occ: str) -> Optional[Path]:
+    """Copy a file that failed to parse somewhere it will survive cleanup.
+
+    Best-effort: a failure to preserve the evidence must not mask the
+    original parse error, so this never raises.
+    """
+    try:
+        keep_dir = Path(tempfile.gettempdir()) / "contract-history-failures"
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        dest = keep_dir / f"{occ}.csv"
+        shutil.copy(path, dest)
+        return dest
+    except Exception:
+        logger.warning("Could not retain failed download for %s", occ, exc_info=True)
+        return None
+
+
+def _download_batch(jobs: list[tuple[str, str]], dest_dir: Path) -> dict:
+    """Download every job in ONE browser session. Runs on a worker thread.
+
+    jobs: list of (underlying_symbol, occ_symbol).
+    Returns {occ_symbol: Path | Exception}.
+
+    No database access happens here: sync_playwright() cannot run on a
+    thread with a running event loop, and the AsyncSession belongs to the
+    loop's thread.
+    """
+    from app.stocknear import StockNearScraper  # deferred: keeps Playwright
+                                                # out of this module's import
+    results: dict = {}
+    with StockNearScraper() as scraper:
+        for symbol, occ in jobs:
+            try:
+                results[occ] = scraper.download_contract_history(symbol, occ, dest_dir)
+            except Exception as e:  # recorded per contract; batch continues
+                logger.warning("Download failed for %s: %s", occ, e)
+                results[occ] = e
+    return results
+
+
+async def sync_open_positions(
+    db: AsyncSession, force: bool = False, downloader=None
+) -> SyncSummary:
+    """Download and store history for every contract with an open position.
+
+    downloader: optional callable (symbol, occ_symbol, dest_dir) -> Path,
+        used per contract instead of a real browser session. Tests inject
+        this; production leaves it None.
+    """
+    stmt = (
+        select(OptionContract)
+        .join(OptionPosition, OptionPosition.contract_id == OptionContract.id)
+        .where(OptionPosition.is_closed == False)  # noqa: E712
+    )
+    contracts = (await db.execute(stmt)).scalars().all()
+
+    summary = SyncSummary(contracts_total=len(contracts))
+    if not contracts:
+        return summary
+
+    status_stmt = select(ContractHistorySync).where(
+        ContractHistorySync.contract_id.in_([c.id for c in contracts])
+    )
+    statuses = {
+        s.contract_id: s for s in (await db.execute(status_stmt)).scalars().all()
+    }
+
+    ttl = timedelta(seconds=settings.stocknear_history_ttl_seconds)
+    now = datetime.utcnow()
+
+    due: list[OptionContract] = []
+    for c in contracts:
+        status = statuses.get(c.id)
+        fresh = (
+            status is not None
+            and status.last_success_at is not None
+            and now - status.last_success_at < ttl
+        )
+        if fresh and not force:
+            summary.skipped += 1
+        else:
+            due.append(c)
+
+    if not due:
+        return summary
+
+    with tempfile.TemporaryDirectory(prefix="contract-history-") as tmpdir:
+        dest_dir = Path(tmpdir)
+        jobs = [(c.symbol, occ_symbol(c)) for c in due]
+
+        if downloader is None:
+            downloaded = await asyncio.to_thread(_download_batch, jobs, dest_dir)
+        else:
+            downloaded = {}
+            for symbol, occ in jobs:
+                try:
+                    downloaded[occ] = downloader(symbol, occ, dest_dir)
+                except Exception as e:
+                    downloaded[occ] = e
+
+        for contract in due:
+            occ = occ_symbol(contract)
+            status = statuses.get(contract.id)
+            if status is None:
+                status = ContractHistorySync(contract_id=contract.id)
+                db.add(status)
+                statuses[contract.id] = status
+            status.last_attempt_at = now
+
+            result = downloaded.get(occ)
+            if isinstance(result, Exception) or result is None:
+                message = str(result) if result is not None else "no download produced"
+                status.last_error = message
+                summary.failed += 1
+                summary.errors.append(SyncError(contract=occ, error=message))
+                continue
+
+            try:
+                rows = parse_history_csv(result)
+                written = await upsert_history(db, contract.id, rows)
+            except Exception as e:
+                # The enclosing TemporaryDirectory is about to delete the
+                # file, so copy it somewhere durable first — a malformed
+                # download is exactly what you need in hand to diagnose a
+                # parser failure, and it is unreproducible once discarded.
+                kept = _retain_failed_download(result, occ)
+                logger.exception("Parse/upsert failed for %s (kept at %s)", occ, kept)
+                status.last_error = f"{type(e).__name__}: {e} (file kept at {kept})"
+                summary.failed += 1
+                summary.errors.append(SyncError(contract=occ, error=str(e)))
+                continue
+
+            status.last_success_at = now
+            status.last_error = None
+            status.row_count = written
+            summary.synced += 1
+            summary.rows_upserted += written
+
+    await db.commit()
+    return summary
