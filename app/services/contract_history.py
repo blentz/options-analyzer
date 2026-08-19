@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import ContractHistory, ContractHistorySync, OptionContract, OptionPosition
-from app.stocknear_models import ContractHistoryError
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +332,27 @@ def _download_batch(jobs: list[tuple[str, str]], dest_dir: Path) -> dict:
     return results
 
 
+async def _get_or_create_status(db: AsyncSession, contract_id: int) -> ContractHistorySync:
+    """Fetch (or create) a contract's sync-status row.
+
+    Used to re-establish the status object after a rollback: a row added
+    via db.add() earlier in the same transaction does not exist once that
+    transaction is rolled back, and an existing row's in-memory state is
+    stale, so the caller must not keep using the object it already had.
+    """
+    status = (
+        await db.execute(
+            select(ContractHistorySync).where(
+                ContractHistorySync.contract_id == contract_id
+            )
+        )
+    ).scalar_one_or_none()
+    if status is None:
+        status = ContractHistorySync(contract_id=contract_id)
+        db.add(status)
+    return status
+
+
 async def sync_open_positions(
     db: AsyncSession, force: bool = False, downloader=None
 ) -> SyncSummary:
@@ -381,7 +401,16 @@ async def sync_open_positions(
 
     with tempfile.TemporaryDirectory(prefix="contract-history-") as tmpdir:
         dest_dir = Path(tmpdir)
-        jobs = [(c.symbol, occ_symbol(c)) for c in due]
+
+        # Resolve each due contract's identity into plain values now,
+        # before any commit/rollback happens. A mid-loop rollback expires
+        # every object still tracked by the session -- including primary
+        # keys -- and touching an expired attribute outside of an active
+        # await raises MissingGreenlet under the async driver. Plain
+        # (id, symbol, occ) tuples sidestep that entirely: nothing below
+        # ever reads an attribute off a `due` contract again.
+        job_meta = [(c.id, c.symbol, occ_symbol(c)) for c in due]
+        jobs = [(symbol, occ) for _, symbol, occ in job_meta]
 
         if downloader is None:
             downloaded = await asyncio.to_thread(_download_batch, jobs, dest_dir)
@@ -393,26 +422,43 @@ async def sync_open_positions(
                 except Exception as e:
                     downloaded[occ] = e
 
-        for contract in due:
-            occ = occ_symbol(contract)
-            status = statuses.get(contract.id)
-            if status is None:
-                status = ContractHistorySync(contract_id=contract.id)
-                db.add(status)
-                statuses[contract.id] = status
+        # Each contract commits (or rolls back) its own transaction. A
+        # batch-wide atomic commit is incompatible with per-contract
+        # isolation: upsert_history only db.add()s and never flushes, so
+        # an IntegrityError from the (contract_id, date) unique index
+        # would otherwise surface later via autoflush -- misattributed to
+        # whichever contract queries the session next -- and poison the
+        # session so the final commit raises, discarding every contract's
+        # successful writes along with it. Flushing inside each contract's
+        # own try/except, and rolling back before touching the session
+        # again, keeps one bad download from taking down the batch.
+        #
+        # The pre-fetched `statuses` dict is not reused here: any status
+        # object cached there may have been expired (or, if newly added
+        # and never persisted, discarded outright) by an earlier
+        # iteration's rollback. `_get_or_create_status` re-queries fresh
+        # every time, which is the only way to avoid working with a stale
+        # or invalid object after a rollback anywhere earlier in the loop.
+        for contract_id, symbol, occ in job_meta:
+            status = await _get_or_create_status(db, contract_id)
             status.last_attempt_at = now
 
             result = downloaded.get(occ)
             if isinstance(result, Exception) or result is None:
                 message = str(result) if result is not None else "no download produced"
                 status.last_error = message
+                await db.commit()
                 summary.failed += 1
                 summary.errors.append(SyncError(contract=occ, error=message))
                 continue
 
             try:
                 rows = parse_history_csv(result)
-                written = await upsert_history(db, contract.id, rows)
+                written = await upsert_history(db, contract_id, rows)
+                # Surface constraint violations HERE, attributed to this
+                # contract, rather than letting them wait for the next
+                # contract's autoflush.
+                await db.flush()
             except Exception as e:
                 # The enclosing TemporaryDirectory is about to delete the
                 # file, so copy it somewhere durable first — a malformed
@@ -420,7 +466,16 @@ async def sync_open_positions(
                 # parser failure, and it is unreproducible once discarded.
                 kept = _retain_failed_download(result, occ)
                 logger.exception("Parse/upsert failed for %s (kept at %s)", occ, kept)
+                # The session is unusable until rolled back, and the
+                # rollback discards `status` if it was newly added this
+                # transaction (never persisted) or expires it otherwise --
+                # so it must be re-fetched (or re-created) rather than
+                # reused.
+                await db.rollback()
+                status = await _get_or_create_status(db, contract_id)
+                status.last_attempt_at = now
                 status.last_error = f"{type(e).__name__}: {e} (file kept at {kept})"
+                await db.commit()
                 summary.failed += 1
                 summary.errors.append(SyncError(contract=occ, error=str(e)))
                 continue
@@ -428,8 +483,8 @@ async def sync_open_positions(
             status.last_success_at = now
             status.last_error = None
             status.row_count = written
+            await db.commit()
             summary.synced += 1
             summary.rows_upserted += written
 
-    await db.commit()
     return summary
