@@ -185,9 +185,28 @@ requiring a market calendar the application does not have.
 ## Error Handling
 
 **Contract substitution.** After navigation the served contract must be
-verified against the requested one, by asserting the page URL still contains
-the requested OCC symbol and that the Pro-subscription banner is absent. A
-mismatch raises `ProGatedError`.
+verified against the requested one. The authoritative check parses the page
+URL and compares its `contract` query parameter for exact, case-insensitive
+equality with the requested OCC symbol. A mismatch raises `ProGatedError`, as
+does a URL carrying no `contract` parameter at all — being unable to confirm
+which contract was served must never be treated as confirmation that it was
+the right one.
+
+An earlier draft of this design asserted only that the URL *contained* the
+requested symbol. That is bypassable and was replaced: substring containment
+passes a URL that serves one contract while echoing the requested one in a
+second parameter, and passes a longer symbol that merely has the requested one
+as a prefix. Exact parameter comparison closes both.
+
+The Pro-subscription banner is checked too, before the URL, so that a page
+rendering the banner before rewriting its URL still raises. It is a secondary
+signal only: the banner is prose Stocknear controls and can be reworded at any
+time, whereas a substitution necessarily changes the `contract` parameter.
+Detection must not depend on the wording.
+
+The guard also rejects an empty or non-string requested symbol, raising
+`ContractHistoryError`. An empty symbol would otherwise make the comparison
+vacuous and silently approve whatever was served.
 
 This check is not defensive padding. The substitution returns HTTP 200 with
 valid, well-formed CSV for a real contract, so every layer downstream — the
