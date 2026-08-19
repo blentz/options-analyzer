@@ -206,7 +206,7 @@ class DownloadTimeoutError(ContractHistoryError):
     """The download menu, CSV item, or download event never arrived."""
 
 
-_PRO_BANNER = "requires a pro subscription"
+_PRO_BANNER = "requires a pro subscription. showing the nearest available"
 _LOGIN_MARKERS = ("/login", "accounts.google.com")
 
 
@@ -238,8 +238,28 @@ def verify_contract_served(
             "session cookies are expired or missing."
         )
 
-    # Banner check: secondary signal. If Stocknear rewords the banner,
-    # the query-parameter comparison below is the authoritative check and
+    # A redirect that is neither a recognised login bounce nor the
+    # contract-lookup page itself (e.g. /sign-in, /auth, some other
+    # interstitial) is not a subscription problem -- it just isn't the
+    # page we asked for. Reporting it as ProGatedError would send the
+    # user to check their subscription when their cookies actually
+    # expired in some way _LOGIN_MARKERS doesn't recognise. This still
+    # fails closed (a plain ContractHistoryError, not a silent pass); it
+    # only changes the label so the user is pointed at the right fix.
+    parsed_path = urlparse(page_url or "").path.lower()
+    if "contract-lookup" not in parsed_path:
+        raise ContractHistoryError(
+            f"Requesting {requested_occ} landed on an unexpected page "
+            f"(not the contract-lookup page): {page_url!r}"
+        )
+
+    # Banner check: secondary signal. Matches the fuller observed sentence
+    # ("... requires a Pro subscription. Showing the nearest available
+    # date") rather than the bare "requires a pro subscription" fragment,
+    # which risked matching an unrelated site-wide upsell banner appearing
+    # anywhere in the page body and misreporting a correctly-served
+    # contract as gated. If Stocknear rewords the banner, the
+    # query-parameter comparison below is the authoritative check and
     # will catch the substitution. This banner check exists to catch the
     # case where the URL rewrite hasn't happened yet but the banner has
     # rendered. Do NOT rely on the banner as the real guard.

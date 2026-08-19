@@ -10,6 +10,7 @@ import pytest
 
 from app.stocknear_models import (
     AuthExpiredError,
+    ContractHistoryError,
     ProGatedError,
     verify_contract_served,
 )
@@ -28,6 +29,23 @@ class TestAccepts:
 
     def test_case_insensitive_url(self):
         verify_contract_served(WANTED, GOOD_URL.lower(), "Contract History")
+
+    def test_unrelated_sitewide_upsell_does_not_false_positive(self):
+        """N2 regression: a nav/footer upsell containing the short fragment
+        "requires a pro subscription" (without the fuller sentence) must not
+        raise ProGatedError for a correctly-served contract. Before this
+        fix, the banner check matched the bare fragment anywhere in
+        get_page_text() (the whole <body>, nav/sidebar/footer included),
+        so a site-wide "Unlock more charts -- requires a Pro subscription"
+        banner would incorrectly gate a correctly-served page, and since
+        the banner check runs before the URL comparison, the authoritative
+        check never got a chance to clear it.
+        """
+        page_text = (
+            "Contract History  History  Download  "
+            "Unlock advanced charts -- requires a Pro subscription today!"
+        )
+        verify_contract_served(WANTED, GOOD_URL, page_text)
 
 
 class TestRejects:
@@ -56,6 +74,28 @@ class TestRejects:
         """A login redirect has no contract in the URL; report the real cause."""
         with pytest.raises(AuthExpiredError):
             verify_contract_served(WANTED, "https://www.stocknear.com/login", BANNER)
+
+    def test_unrecognized_redirect_raises_plain_error_not_pro_gated(self):
+        """A bounce to /sign-in, /auth, or any interstitial that isn't the
+        contract-lookup page and isn't a recognised login marker must not be
+        mislabeled as a subscription problem -- the user's cookies may have
+        simply expired in a way _LOGIN_MARKERS doesn't recognise. It should
+        still fail closed (a plain ContractHistoryError), just not point the
+        user at the wrong fix.
+        """
+        with pytest.raises(ContractHistoryError) as exc:
+            verify_contract_served(
+                WANTED, "https://www.stocknear.com/sign-in?next=/x", "Sign in"
+            )
+        assert not isinstance(exc.value, ProGatedError)
+        assert not isinstance(exc.value, AuthExpiredError)
+
+    def test_unrecognized_interstitial_without_contract_param_raises_plain_error(self):
+        with pytest.raises(ContractHistoryError) as exc:
+            verify_contract_served(
+                WANTED, "https://www.stocknear.com/auth/callback", "One moment..."
+            )
+        assert not isinstance(exc.value, ProGatedError)
 
 
 class TestVulnerabilityFixes:

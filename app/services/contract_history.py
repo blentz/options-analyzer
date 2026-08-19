@@ -8,9 +8,10 @@ see docs/superpowers/specs/2026-08-19-contract-history-download-design.md.
 import asyncio
 import csv
 import logging
+import re
 import shutil
 import tempfile
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import ContractHistory, ContractHistorySync, OptionContract, OptionPosition
+from app.stocknear_models import ContractHistoryError
 
 logger = logging.getLogger(__name__)
 
@@ -127,16 +129,17 @@ class ContractHistoryParseError(Exception):
     """The downloaded file was not a parseable contract-history CSV."""
 
 
-def _dec(raw: str) -> Optional[Decimal]:
+def _dec(raw: Optional[str]) -> Optional[Decimal]:
     if raw is None or raw.strip() == "":
         return None
     try:
         return Decimal(raw.strip())
     except InvalidOperation:
+        logger.warning("Could not parse decimal value %r", raw)
         return None
 
 
-def _int(raw: str) -> Optional[int]:
+def _int(raw: Optional[str]) -> Optional[int]:
     if raw is None or raw.strip() == "":
         return None
     try:
@@ -151,15 +154,17 @@ def _int(raw: str) -> Optional[int]:
             )
         return truncated
     except ValueError:
+        logger.warning("Could not parse integer value %r", raw)
         return None
 
 
-def _flt(raw: str) -> Optional[float]:
+def _flt(raw: Optional[str]) -> Optional[float]:
     if raw is None or raw.strip() == "":
         return None
     try:
         return float(raw.strip())
     except ValueError:
+        logger.warning("Could not parse float value %r", raw)
         return None
 
 
@@ -225,7 +230,15 @@ async def upsert_history(
 
     Rows present in the DB but absent from `rows` are left unchanged — a
     shorter download is treated as a partial fetch, never as evidence that
-    the source has deleted data.
+    the source has deleted data. That "never treated as deletion" guarantee
+    is at date granularity only, not column granularity: for a date that
+    IS present in `rows`, every column on that row is overwritten from the
+    incoming data, including columns that come back empty. A cell that
+    goes empty upstream (e.g. bid/ask on a day with no quotes) will null
+    out a previously-stored non-empty value for that same cell. This is
+    deliberate — the row is treated as the current source of truth for
+    that date — but it means the guarantee above applies to whole missing
+    dates, not to individual cells within a date that IS present.
 
     Returns the number of rows written (inserted + updated), counting all
     rows processed regardless of whether their values changed. On a normal
@@ -270,11 +283,10 @@ class SyncSummary:
     skipped: int = 0
     failed: int = 0
     rows_upserted: int = 0
-    errors: list = None
+    errors: list[SyncError] = field(default_factory=list)
 
-    def __post_init__(self):
-        if self.errors is None:
-            self.errors = []
+
+_OCC_SYMBOL_PATTERN = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 def occ_symbol(contract: OptionContract) -> str:
@@ -282,14 +294,28 @@ def occ_symbol(contract: OptionContract) -> str:
 
     Mirrors StockNearScraper._build_contract_id, reimplemented here rather
     than imported because that module pulls in Playwright.
+
+    Validates the result against the OCC shape before returning it. This
+    value flows unvalidated into a filesystem path in
+    StockNearScraper.download_contract_history (`dest_dir /
+    f"{occ_symbol}.csv"`) and into a URL query parameter; a symbol
+    containing `/` or `..` could write outside the intended temp
+    directory. occ_symbol() is the sole real producer of this string, so
+    validating here closes that off for every caller.
     """
     type_char = "P" if contract.option_type.upper() == "PUT" else "C"
     strike_int = int(Decimal(str(contract.strike)) * 1000)
-    return (
+    symbol = (
         f"{contract.symbol.upper()}"
         f"{contract.expiration.strftime('%y%m%d')}"
         f"{type_char}{strike_int:08d}"
     )
+    if not _OCC_SYMBOL_PATTERN.match(symbol):
+        raise ContractHistoryError(
+            f"Built OCC symbol {symbol!r} does not match the expected "
+            f"OCC format; refusing to use it as a filename/URL component."
+        )
+    return symbol
 
 
 def _retain_failed_download(path: Path, occ: str) -> Optional[Path]:
@@ -318,17 +344,46 @@ def _download_batch(jobs: list[tuple[str, str]], dest_dir: Path) -> dict:
     No database access happens here: sync_playwright() cannot run on a
     thread with a running event loop, and the AsyncSession belongs to the
     loop's thread.
+
+    Deliberately does not use `with StockNearScraper() as scraper:`.
+    `start()` does a real page.goto auth probe, and two things go wrong
+    if it raises inside a `with`: `__exit__` never runs (entry never
+    completed), leaking a Playwright driver process per call; and the
+    exception propagates straight out of this function before `results`
+    is returned, discarding every contract's failure with it and letting
+    the whole batch surface as a bare 500 with nothing recorded anywhere.
     """
     from app.stocknear import StockNearScraper  # deferred: keeps Playwright
                                                 # out of this module's import
     results: dict = {}
-    with StockNearScraper() as scraper:
+    scraper = StockNearScraper()
+    try:
+        scraper.start()
         for symbol, occ in jobs:
             try:
                 results[occ] = scraper.download_contract_history(symbol, occ, dest_dir)
             except Exception as e:  # recorded per contract; batch continues
                 logger.warning("Download failed for %s: %s", occ, e)
                 results[occ] = e
+    except Exception as e:
+        # start() failed (missing Firefox, bad profile path, slow site,
+        # ...) before or during the loop above. Record the real cause
+        # against every due contract that doesn't already have a result,
+        # so a batch-level failure still leaves something for the user to
+        # see and act on, per contract, exactly like a per-contract one.
+        logger.warning("Batch-level scraper failure: %s", e)
+        for _, occ in jobs:
+            results.setdefault(occ, e)
+    finally:
+        # Always attempt teardown, even when start() itself raised.
+        # `results` is fully built by this point, so a raising close()
+        # cannot discard it -- unlike returning from inside a `with`
+        # block, where the return happens only after __exit__ completes.
+        try:
+            scraper.close()
+        except Exception:
+            logger.warning("Scraper close() failed after batch", exc_info=True)
+
     return results
 
 
@@ -445,7 +500,14 @@ async def sync_open_positions(
 
             result = downloaded.get(occ)
             if isinstance(result, Exception) or result is None:
-                message = str(result) if result is not None else "no download produced"
+                # Same shape as the parse-failure branch below
+                # (type name + message) -- str(e) alone renders as an
+                # empty string for an exception constructed with no args.
+                message = (
+                    f"{type(result).__name__}: {result}"
+                    if result is not None
+                    else "no download produced"
+                )
                 status.last_error = message
                 await db.commit()
                 summary.failed += 1
@@ -477,7 +539,14 @@ async def sync_open_positions(
                 status.last_error = f"{type(e).__name__}: {e} (file kept at {kept})"
                 await db.commit()
                 summary.failed += 1
-                summary.errors.append(SyncError(contract=occ, error=str(e)))
+                # Use status.last_error, not str(e): str(e) for a parse
+                # failure names the temp-directory path, which is about to
+                # be deleted when the enclosing TemporaryDirectory exits.
+                # status.last_error carries the durable
+                # /tmp/contract-history-failures/... path instead, so the
+                # errors[] the endpoint returns points somewhere that
+                # still exists.
+                summary.errors.append(SyncError(contract=occ, error=status.last_error))
                 continue
 
             status.last_success_at = now

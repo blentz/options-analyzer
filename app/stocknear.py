@@ -395,7 +395,8 @@ class StockNearScraper:
             Contract ID string like "BEPC260320P00035000"
         """
         from datetime import datetime
-        
+        from decimal import Decimal
+
         # Parse expiration date - try multiple formats
         exp_date = None
         for fmt in ["%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y"]:
@@ -404,20 +405,24 @@ class StockNearScraper:
                 break
             except ValueError:
                 continue
-        
+
         if not exp_date:
             raise ValueError(f"Could not parse expiration date: {expiration}")
-        
+
         # Format: YYMMDD
         date_str = exp_date.strftime("%y%m%d")
-        
+
         # P for PUT, C for CALL
         type_char = "P" if option_type.upper() == "PUT" else "C"
-        
-        # Strike * 1000, padded to 8 digits
-        strike_int = int(strike * 1000)
+
+        # Strike * 1000, padded to 8 digits. Routed through Decimal(str(...))
+        # rather than int(strike * 1000) directly: plain float multiplication
+        # truncates (e.g. 2.55 * 1000 == 2549.9999999999995, so int() yields
+        # 2549 instead of 2550). Mirrors app.services.contract_history.occ_symbol,
+        # which this must agree with — see that module's docstring for why.
+        strike_int = int(Decimal(str(strike)) * 1000)
         strike_str = f"{strike_int:08d}"
-        
+
         return f"{symbol.upper()}{date_str}{type_char}{strike_str}"
 
     def get_contract_quote(self, symbol: str, expiration: str, strike: float, option_type: str) -> ContractQuote:
@@ -967,7 +972,12 @@ class StockNearScraper:
         self._rate_limit()
         url = self._contract_lookup_url(symbol, occ_symbol)
         logger.info("Downloading contract history for %s", occ_symbol)
-        self.page.goto(url, wait_until="networkidle")
+        # Explicit, shorter-than-default timeout. Playwright's default
+        # navigation timeout is 30s; worst case per contract is otherwise
+        # goto (30s) + settle wait (10s) + 1.5s + expect_download (30s) =
+        # ~75s, and a multi-contract book on a degraded site can exceed
+        # common proxy/gateway timeouts well before the batch finishes.
+        self.page.goto(url, wait_until="networkidle", timeout=15000)
 
         # networkidle does not guarantee the out-of-tier rewrite (a
         # client-side redirect to a nearer expiration) has landed yet.
@@ -981,7 +991,7 @@ class StockNearScraper:
                 """() => {
                     const t = document.body.innerText;
                     return t.includes('Contract History') || t.includes('Download') ||
-                           t.includes('Pro subscription') || t.includes('not found') ||
+                           t.includes('requires a Pro subscription') || t.includes('not found') ||
                            t.includes('Log in');
                 }""",
                 timeout=10000,

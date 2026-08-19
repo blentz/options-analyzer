@@ -118,6 +118,29 @@ async def test_records_failure_without_raising(db):
 
 
 @pytest.mark.asyncio
+async def test_download_failure_with_no_message_keeps_exception_type(db):
+    """N4: an exception constructed without arguments renders as an empty
+    string via str(e). The download-path branch must use the same
+    "TypeName: message" shape as the parse-failure branch, so a failure
+    like `raise DownloadTimeoutError()` still names the exception type
+    instead of leaving last_error / errors[] blank.
+    """
+    await _open_position(db)
+    await db.commit()
+
+    def empty_message_downloader(symbol, occ_symbol, dest_dir):
+        raise ProGatedError()
+
+    summary = await sync_open_positions(db, downloader=empty_message_downloader)
+
+    assert summary.failed == 1
+    assert summary.errors[0].error == "ProGatedError: "
+
+    status = (await db.execute(select(ContractHistorySync))).scalars().one()
+    assert status.last_error == "ProGatedError: "
+
+
+@pytest.mark.asyncio
 async def test_one_failure_does_not_abort_batch(db):
     good = await _open_position(db)
     bad = await _open_position(db, strike="5.00")
@@ -161,6 +184,15 @@ async def test_unparseable_download_is_recorded_and_retained(db):
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
     assert status.last_success_at is None
     assert "kept at" in status.last_error
+
+    # N5: errors[] must carry the SAME message as last_error -- the
+    # durable /tmp/contract-history-failures/... path -- not str(e), which
+    # names the temp download path that the enclosing TemporaryDirectory
+    # is about to delete. Before the fix, the endpoint's errors[] pointed
+    # a user at a path that no longer existed and never showed them the
+    # one that did.
+    assert summary.errors[0].error == status.last_error
+    assert "contract-history-failures" in summary.errors[0].error
 
     kept = Path(tempfile.gettempdir()) / "contract-history-failures" / "HITI261016P00002500.csv"
     assert kept.exists()

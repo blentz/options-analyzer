@@ -126,6 +126,67 @@ class TestNonIntegralCountTruncation:
         assert "Truncating non-integral count value '4.7' to 4" in caplog.text
 
 
+class TestUnparseableCellsWarn:
+    """N3: a non-empty cell that fails to parse still becomes None (never
+    "repaired"), but must not do so silently — if Stocknear ever emits
+    "$0.30", "1,234", or "N/A" for a numeric column, every affected column
+    would otherwise go NULL across all rows with the sync still reporting
+    success and nothing in the logs to explain why.
+    """
+
+    def test_unparseable_decimal_cell_warns_and_becomes_none(self, tmp_path, caplog):
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest\n"
+            "2026-08-19,$0.30,0.3,0.3,0.3,1,3784\n"
+        )
+
+        rows = parse_history_csv(csv_file)
+        assert rows[0].open_ is None
+        assert "Could not parse decimal value" in caplog.text
+        assert "$0.30" in caplog.text
+
+    def test_unparseable_int_cell_warns_and_becomes_none(self, tmp_path, caplog):
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest\n"
+            "2026-08-19,0.3,0.3,0.3,0.3,N/A,3784\n"
+        )
+
+        rows = parse_history_csv(csv_file)
+        assert rows[0].volume is None
+        assert "Could not parse integer value" in caplog.text
+        assert "N/A" in caplog.text
+
+    def test_unparseable_float_cell_warns_and_becomes_none(self, tmp_path, caplog):
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest,delta\n"
+            "2026-08-19,0.3,0.3,0.3,0.3,1,3784,N/A\n"
+        )
+
+        rows = parse_history_csv(csv_file)
+        assert rows[0].delta is None
+        assert "Could not parse float value" in caplog.text
+        assert "N/A" in caplog.text
+
+    def test_empty_cells_do_not_warn(self, tmp_path, caplog):
+        """An empty cell is routine sparse data (see TestSparseRows), not a
+        parse failure -- it must not trigger the same warning as an
+        unparseable non-empty value.
+        """
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "date,open,high,low,close,volume,open_interest\n"
+            "2026-08-19,,0.3,0.3,0.3,,3784\n"
+        )
+
+        rows = parse_history_csv(csv_file)
+        assert rows[0].open_ is None
+        assert rows[0].volume is None
+        assert "Could not parse" not in caplog.text
+
+
 class TestMissingDateColumn:
     """CSV with no date column raises ContractHistoryParseError."""
 
