@@ -13,6 +13,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import ContractHistory
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,3 +203,39 @@ def parse_history_csv(path: Path) -> list[HistoryRow]:
         raise ContractHistoryParseError(f"{path} contained no parseable rows")
 
     return rows
+
+
+# Field name on HistoryRow -> attribute on ContractHistory. They are
+# identical by construction; this is derived rather than repeated so the
+# two cannot drift.
+_ROW_FIELDS = [f.name for f in fields(HistoryRow) if f.name != "date"]
+
+
+async def upsert_history(
+    db: AsyncSession, contract_id: int, rows: list[HistoryRow]
+) -> int:
+    """Insert or update history rows for one contract, keyed on (contract, date).
+
+    Each download is a complete history, so this runs against overlapping
+    data on every sync. Returns the number of rows written. Does not commit.
+    """
+    if not rows:
+        return 0
+
+    existing_stmt = select(ContractHistory).where(
+        ContractHistory.contract_id == contract_id,
+        ContractHistory.date.in_([r.date for r in rows]),
+    )
+    existing = {
+        h.date: h for h in (await db.execute(existing_stmt)).scalars().all()
+    }
+
+    for row in rows:
+        target = existing.get(row.date)
+        if target is None:
+            target = ContractHistory(contract_id=contract_id, date=row.date)
+            db.add(target)
+        for name in _ROW_FIELDS:
+            setattr(target, name, getattr(row, name))
+
+    return len(rows)
