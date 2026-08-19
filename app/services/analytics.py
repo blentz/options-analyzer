@@ -190,6 +190,10 @@ class PositionDetail:
     total_pnl: Decimal  # Combined P&L
     is_winner: bool
     is_closed: bool
+    contract_pk: int = 0  # option_contracts.id — distinct from contract_id
+    # above, which is a display string. Used to key ContractHistorySync
+    # lookups for the positions page. Defaulted for any other constructor
+    # callers that predate this field.
 
 
 @dataclass
@@ -766,6 +770,7 @@ async def get_positions(
     for p in positions:
         details.append(PositionDetail(
             contract_id=p.contract.contract_id,
+            contract_pk=p.contract_id,
             symbol=p.contract.symbol,
             expiration=p.contract.expiration.strftime('%m/%d/%y'),
             strike=p.contract.strike,

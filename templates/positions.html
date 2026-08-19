@@ -85,10 +85,12 @@
             <th class="sortable" data-sort="money">Stock P&L</th>
             <th class="sortable" data-sort="money">Total P&L</th>
             <th class="sortable" data-sort="string">Result</th>
+            <th data-sort="string">History Sync</th>
         </tr>
     </thead>
     <tbody>
         {% for p in positions %}
+        {% set status = sync_status.get(p.contract_pk) %}
         <tr>
             <td><strong>{{ p.symbol }}</strong></td>
             <td>{{ p.expiration }} ${{ p.strike }} {{ p.option_type }}</td>
@@ -120,6 +122,31 @@
                     {% endif %}
                 {% else %}
                     <span class="tag open">OPEN</span>
+                {% endif %}
+            </td>
+            <td style="font-size: 0.85rem;">
+                {% if status %}
+                    {% if status.last_success_at %}
+                        <span style="color: #888;" title="Last successful history sync">
+                            Synced {{ status.last_success_at.strftime('%Y-%m-%d %H:%M') }} UTC
+                        </span>
+                    {% endif %}
+                    {% if status.last_error %}
+                        {# Truncated only -- never the full text, even via a
+                           title attribute. last_error can carry a URL the
+                           *remote* Stocknear site chose via an unexpected
+                           redirect (see syncContractHistory()'s JS comment
+                           on the same risk), so it is kept short and never
+                           echoed back in full. #}
+                        {% set err_short = (status.last_error[:80] + '…') if status.last_error|length > 80 else status.last_error %}
+                        <br>
+                        <span style="color: #ef4444;">{{ err_short }}</span>
+                    {% endif %}
+                    {% if not status.last_success_at and not status.last_error %}
+                        <span style="color: #888;">-</span>
+                    {% endif %}
+                {% else %}
+                    <span style="color: #888;">-</span>
                 {% endif %}
             </td>
         </tr>

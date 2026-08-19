@@ -665,9 +665,28 @@ async def positions_page(
         db, closed_only=closed, open_only=open, date_range=date_range,
     )
 
+    # Per-contract sync status (last_success_at / last_error), keyed by
+    # contract_pk so the template can look each row's status up directly.
+    # Without this the status shown by the sync button is transient — it
+    # clears on reload — so a contract that fails every sync (e.g.
+    # ProGatedError) becomes invisible the moment the user navigates away.
+    from app.models import ContractHistorySync
+    contract_pks = [p.contract_pk for p in positions]
+    sync_status: dict = {}
+    if contract_pks:
+        sync_rows = (
+            await db.execute(
+                select(ContractHistorySync).where(
+                    ContractHistorySync.contract_id.in_(contract_pks)
+                )
+            )
+        ).scalars().all()
+        sync_status = {s.contract_id: s for s in sync_rows}
+
     return templates.TemplateResponse("positions.html", {
         "request": request,
         "positions": positions,
+        "sync_status": sync_status,
         "show_closed_only": closed,
         "show_open_only": open,
         "date_range": date_range,
