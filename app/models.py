@@ -3,7 +3,7 @@
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Integer, Numeric, DateTime, Date, ForeignKey, Index, Boolean, func
+from sqlalchemy import String, Integer, Numeric, DateTime, Date, ForeignKey, Index, Boolean, Float, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -278,3 +278,87 @@ class StockNearCache(Base):
     __table_args__ = (
         Index('ix_stocknear_cache_lookup', 'cache_key', 'expires_at'),
     )
+
+
+class ContractHistory(Base):
+    """One trading day of history for one option contract.
+
+    Sourced from Stocknear's contract-lookup CSV export. Every column but
+    the identity pair is nullable: the source omits second-order greeks on
+    older rows and quotes on days with no market, and rejecting those rows
+    would discard real data.
+    """
+    __tablename__ = "contract_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("option_contracts.id"), index=True
+    )
+    date: Mapped[date] = mapped_column(Date, index=True)
+
+    # Prices. `open` is a Python builtin, so the attribute carries a
+    # trailing underscore while the column keeps the source's name.
+    open_: Mapped[Optional[Decimal]] = mapped_column("open", Numeric(12, 4), nullable=True)
+    high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    bid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    ask: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    mark: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+
+    # Counts.
+    volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    open_interest: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    change_oi: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    dte: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # Volatility. Stored as a decimal fraction (0.5812), matching the source
+    # and every other implied_volatility in this schema.
+    implied_volatility: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    changes_percentage_oi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Greeks. Float rather than Numeric — these are not money, and exact
+    # decimal semantics buy nothing for a vanna value.
+    delta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gamma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    theta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vega: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rho: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    epsilon: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lambda_: Mapped[Optional[float]] = mapped_column("lambda", Float, nullable=True)
+    charm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vanna: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vomma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    veta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vera: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    zomma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    color: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ultima: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Aggregates.
+    gex: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 4), nullable=True)
+    dex: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 4), nullable=True)
+    total_premium: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 4), nullable=True)
+
+    __table_args__ = (
+        Index("ix_contract_history_unique", "contract_id", "date", unique=True),
+    )
+
+
+class ContractHistorySync(Base):
+    """Ingest bookkeeping for contract history, one row per contract.
+
+    Kept out of OptionContract so sync state does not accumulate on the
+    domain model.
+    """
+    __tablename__ = "contract_history_sync"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("option_contracts.id"), unique=True, index=True
+    )
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
