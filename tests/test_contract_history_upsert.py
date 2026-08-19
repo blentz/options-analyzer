@@ -109,3 +109,32 @@ async def test_contracts_are_isolated(db):
 
     count = (await db.execute(select(func.count()).select_from(ContractHistory))).scalar()
     assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_absent_dates_preserved(db):
+    """Shrinking downloads are treated as partial fetches, never deletions.
+
+    A row already in the DB whose date is absent from a newer download is
+    left untouched with its original values intact.
+    """
+    c = await _contract(db)
+    # First sync: two days
+    await upsert_history(db, c.id, [
+        _row(date(2026, 8, 18), close="0.30", oi=3784),
+        _row(date(2026, 8, 19), close="0.35", oi=3800),
+    ])
+    await db.commit()
+
+    # Second sync: only the newer day (simulating a partial/truncated download)
+    await upsert_history(db, c.id, [
+        _row(date(2026, 8, 19), close="0.35", oi=3800),
+    ])
+    await db.commit()
+
+    # Both rows still exist, older one unchanged
+    all_rows = (await db.execute(select(ContractHistory).order_by(ContractHistory.date))).scalars().all()
+    assert len(all_rows) == 2
+    assert all_rows[0].date == date(2026, 8, 18)
+    assert all_rows[0].close == Decimal("0.30")
+    assert all_rows[0].open_interest == 3784

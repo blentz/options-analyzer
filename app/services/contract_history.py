@@ -217,7 +217,19 @@ async def upsert_history(
     """Insert or update history rows for one contract, keyed on (contract, date).
 
     Each download is a complete history, so this runs against overlapping
-    data on every sync. Returns the number of rows written. Does not commit.
+    data on every sync. Does not commit; caller controls the transaction.
+
+    Rows present in the DB but absent from `rows` are left unchanged — a
+    shorter download is treated as a partial fetch, never as evidence that
+    the source has deleted data.
+
+    Returns the number of rows written (inserted + updated), counting all
+    rows processed regardless of whether their values changed. On a normal
+    re-sync with unchanged data, this returns the batch size, not zero.
+
+    Assumes the caller supplies at most one row per date. Duplicate dates
+    within a single batch will cause IntegrityError on flush due to the
+    (contract_id, date) unique index.
     """
     if not rows:
         return 0
