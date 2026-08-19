@@ -521,6 +521,30 @@ async def rebuild_cycles(db: AsyncSession = Depends(get_db)):
     return {"rebuilt": counts, "total_cycles": sum(counts.values())}
 
 
+@app.post("/api/contract-history/sync")
+async def sync_contract_history(force: bool = False, db: AsyncSession = Depends(get_db)):
+    """Download and store price history for every open position.
+
+    User-triggered and blocking, matching /api/positions/heal and
+    /api/cycles/rebuild. One browser session covers the whole batch, so
+    cost is roughly 15s of launch plus 2-4s per contract.
+
+    Idempotent: each download is a complete history, so re-running
+    converges rather than duplicating.
+    """
+    from app.services.contract_history import sync_open_positions
+
+    summary = await sync_open_positions(db, force=force)
+    return {
+        "contracts_total": summary.contracts_total,
+        "synced": summary.synced,
+        "skipped": summary.skipped,
+        "failed": summary.failed,
+        "rows_upserted": summary.rows_upserted,
+        "errors": [{"contract": e.contract, "error": e.error} for e in summary.errors],
+    }
+
+
 @app.get("/health")
 async def health():
     """Liveness probe — process is up and accepting requests."""

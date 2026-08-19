@@ -63,6 +63,14 @@
        class="btn {% if show_closed_only %}btn-primary{% else %}btn-secondary{% endif %}">Closed Only</a>
 </div>
 
+<div style="margin: 1rem 0; display: flex; align-items: center; gap: 0.75rem;">
+    <button id="sync-history-btn" class="btn btn-secondary" onclick="syncContractHistory()"
+            title="Download contract price history for every open position. Runs a real browser session — expect roughly 15s plus 2-4s per open position.">
+        Sync History
+    </button>
+    <span id="sync-history-status" style="font-size: 0.85rem; color: #888;"></span>
+</div>
+
 {% if positions %}
 <table id="positions-table">
     <thead>
@@ -190,4 +198,38 @@ document.addEventListener('DOMContentLoaded', function() {
     No positions found. <a href="/import" style="color: #22c55e;">Import a CSV file</a> to get started.
 </div>
 {% endif %}
+
+<script>
+async function syncContractHistory() {
+    const btn = document.getElementById('sync-history-btn');
+    const statusEl = document.getElementById('sync-history-status');
+    btn.disabled = true;
+    statusEl.innerHTML = '<span style="color: #888;">Syncing — this can take a minute for a large book…</span>';
+
+    try {
+        const res = await fetch('/api/contract-history/sync', {method: 'POST'});
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({detail: res.statusText}));
+            statusEl.innerHTML = `<span style="color: #ef4444;">${err.detail || 'Sync failed'}</span>`;
+            return;
+        }
+        const data = await res.json();
+        let html = `<span style="color: #22c55e;">${data.synced} synced</span>, ` +
+                    `${data.skipped} skipped, ` +
+                    `<span style="color: ${data.failed ? '#ef4444' : '#888'};">${data.failed} failed</span>, ` +
+                    `${data.rows_upserted} rows upserted`;
+        if (data.errors && data.errors.length) {
+            const items = data.errors.map(e =>
+                `<li><strong>${e.contract}</strong>: ${e.error}</li>`
+            ).join('');
+            html += `<ul style="margin: 0.5rem 0 0 1rem; color: #ef4444;">${items}</ul>`;
+        }
+        statusEl.innerHTML = html;
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color: #ef4444;">Sync failed: ${e.message}</span>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+</script>
 {% endblock %}
