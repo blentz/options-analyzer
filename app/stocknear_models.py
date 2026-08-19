@@ -10,6 +10,7 @@ SQLite reader, no Playwright either).
 
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlparse, parse_qs
 
 
 @dataclass
@@ -218,25 +219,57 @@ def verify_contract_served(
     testing for substitution first would misreport an expired cookie as a
     subscription problem.
     """
+    # Validate input: requested_occ must be a non-empty string
+    if not isinstance(requested_occ, str) or not requested_occ:
+        raise ContractHistoryError(
+            f"requested_occ must be a non-empty string, got {requested_occ!r}"
+        )
+
     url = (page_url or "").lower()
     text = (page_text or "").lower()
     wanted = requested_occ.lower()
 
+    # Check auth first: login redirects have no contract parameter,
+    # so if we checked substitution first we'd misreport an expired cookie
+    # as a subscription problem.
     if any(marker in url for marker in _LOGIN_MARKERS):
         raise AuthExpiredError(
             f"Requesting {requested_occ} redirected to {page_url!r}; "
             "session cookies are expired or missing."
         )
 
+    # Banner check: secondary signal. If Stocknear rewords the banner,
+    # the query-parameter comparison below is the authoritative check and
+    # will catch the substitution. This banner check exists to catch the
+    # case where the URL rewrite hasn't happened yet but the banner has
+    # rendered. Do NOT rely on the banner as the real guard.
     if _PRO_BANNER in text:
         raise ProGatedError(
             f"{requested_occ} requires a higher subscription tier; "
             "Stocknear substituted the nearest available expiration."
         )
 
-    if wanted not in url:
+    # Query-parameter comparison: authoritative check for contract substitution.
+    # Exact match on the contract parameter, case-insensitive. This is the
+    # only reliable way to detect silent contract substitution.
+    # Parse the original (non-lowercased) URL to preserve contract casing in error messages.
+    parsed = urlparse(page_url or "")
+    params = parse_qs(parsed.query)
+
+    # parse_qs returns lists of values; get first element if present
+    served_contract = params.get("contract", [None])[0]
+
+    if served_contract is None:
         raise ProGatedError(
-            f"Requested {requested_occ} but the page served {page_url!r}. "
-            "Refusing to ingest a different contract's history."
+            f"Page URL has no contract parameter. "
+            f"Cannot confirm which contract was served: {page_url!r}"
+        )
+
+    served_contract_lower = served_contract.lower()
+
+    if served_contract_lower != wanted:
+        raise ProGatedError(
+            f"Requested {requested_occ} but the page served {served_contract}. "
+            f"Refusing to ingest a different contract's history."
         )
 
