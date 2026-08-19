@@ -182,3 +182,61 @@ class StockData:
     volume: Optional[int] = None
     raw_content: str = ""
 
+
+class ContractHistoryError(Exception):
+    """Base for contract-history download failures."""
+
+
+class ProGatedError(ContractHistoryError):
+    """Stocknear served a different contract than the one requested.
+
+    Requesting an expiration outside the current subscription tier does not
+    error: the URL is rewritten to a nearer expiration and that contract's
+    history is served with HTTP 200. Treating it as success would write the
+    wrong contract's prices into the database.
+    """
+
+
+class AuthExpiredError(ContractHistoryError):
+    """Session cookies are no longer valid; the page bounced to login."""
+
+
+class DownloadTimeoutError(ContractHistoryError):
+    """The download menu, CSV item, or download event never arrived."""
+
+
+_PRO_BANNER = "requires a pro subscription"
+_LOGIN_MARKERS = ("/login", "accounts.google.com")
+
+
+def verify_contract_served(
+    requested_occ: str, page_url: str, page_text: str
+) -> None:
+    """Raise unless the page is serving the contract we asked for.
+
+    Checks auth first: a login redirect carries no contract in its URL, so
+    testing for substitution first would misreport an expired cookie as a
+    subscription problem.
+    """
+    url = (page_url or "").lower()
+    text = (page_text or "").lower()
+    wanted = requested_occ.lower()
+
+    if any(marker in url for marker in _LOGIN_MARKERS):
+        raise AuthExpiredError(
+            f"Requesting {requested_occ} redirected to {page_url!r}; "
+            "session cookies are expired or missing."
+        )
+
+    if _PRO_BANNER in text:
+        raise ProGatedError(
+            f"{requested_occ} requires a higher subscription tier; "
+            "Stocknear substituted the nearest available expiration."
+        )
+
+    if wanted not in url:
+        raise ProGatedError(
+            f"Requested {requested_occ} but the page served {page_url!r}. "
+            "Refusing to ingest a different contract's history."
+        )
+
