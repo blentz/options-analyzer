@@ -932,6 +932,20 @@ class StockNearScraper:
         logger.info("API batch complete: %d/%d quotes with data", success_count, len(results))
         return results
 
+    def _contract_lookup_url(self, symbol: str, occ_symbol: str) -> str:
+        """Build the contract-lookup page URL for one OCC symbol.
+
+        Lowercases the ticker segment to match this file's other
+        contract-lookup call sites (e.g. line 175, 647). The query string
+        carries exactly one `contract` parameter equal to occ_symbol, which
+        is what `verify_contract_served` requires to confirm the page did
+        not get silently substituted to a different contract.
+        """
+        return (
+            f"{self.base_url}/stocks/{symbol.lower()}"
+            f"/options/contract-lookup?contract={occ_symbol}"
+        )
+
     def download_contract_history(
         self, symbol: str, occ_symbol: str, dest_dir: Path
     ) -> Path:
@@ -947,19 +961,43 @@ class StockNearScraper:
 
         Returns the saved file path.
 
-        Raises ProGatedError, AuthExpiredError, or DownloadTimeoutError.
+        Raises ContractHistoryError, ProGatedError, AuthExpiredError, or
+        DownloadTimeoutError.
         """
         self._rate_limit()
-        url = (
-            f"{self.base_url}/stocks/{symbol.upper()}"
-            f"/options/contract-lookup?contract={occ_symbol}"
-        )
+        url = self._contract_lookup_url(symbol, occ_symbol)
         logger.info("Downloading contract history for %s", occ_symbol)
         self.page.goto(url, wait_until="networkidle")
 
+        # networkidle does not guarantee the out-of-tier rewrite (a
+        # client-side redirect to a nearer expiration) has landed yet.
+        # get_contract_quotes_batch learned this lesson on this same page
+        # (see its wait_for_function below) — mirror it here so the guard
+        # doesn't read a pre-substitution URL/body. Poll for failure
+        # markers too, not just success ones, so gated/expired-session
+        # pages settle fast instead of burning the full timeout.
+        try:
+            self.page.wait_for_function(
+                """() => {
+                    const t = document.body.innerText;
+                    return t.includes('Contract History') || t.includes('Download') ||
+                           t.includes('Pro subscription') || t.includes('not found') ||
+                           t.includes('Log in');
+                }""",
+                timeout=10000,
+            )
+        except Exception as e:
+            # Swallowed deliberately: the guard below is the decision-maker.
+            # If this raised, a gated page that never renders those markers
+            # would surface as a download failure and mask the real
+            # ProGatedError.
+            logger.debug("Settle wait timed out for %s: %s", occ_symbol, e)
+
+        self.page.wait_for_timeout(1500)
+
         # Must run before any data is read. A substituted contract returns
         # HTTP 200 with a valid CSV for the wrong contract.
-        verify_contract_served(occ_symbol, self.page.url, self.page.inner_text("body"))
+        verify_contract_served(occ_symbol, self.page.url, self.get_page_text())
 
         try:
             # The Download control only opens a menu; the CSV item is
