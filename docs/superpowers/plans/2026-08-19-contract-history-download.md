@@ -371,7 +371,7 @@ def parse_history_csv(path: Path) -> list[HistoryRow]:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `pytest tests/test_contract_history_parse.py -v`
-Expected: PASS, 12 tests
+Expected: PASS, 11 tests
 
 - [ ] **Step 6: Verify no Playwright dependency leaked in**
 
