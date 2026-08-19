@@ -37,7 +37,7 @@ Pure parsing, no DB and no browser. This is where most of the risk lives, so it 
 
 - [ ] **Step 1: Copy the fixture CSV into the repo**
 
-A real download already exists at `~/Downloads/HITI261016P00002500_contract_history.csv` (123 data rows, Feb 19 2026 → Aug 19 2026). If it is missing, any contract-history CSV downloaded from Stocknear works, but the row-count assertions below must be updated to match.
+A real download already exists at `~/Downloads/HITI261016P00002500_contract_history.csv` (124 data rows, Feb 19 2026 → Aug 19 2026 — count it with `csv.DictReader`, not `wc -l`; the file has no trailing newline). If it is missing, any contract-history CSV downloaded from Stocknear works, but the row-count assertions below must be updated to match.
 
 ```bash
 mkdir -p tests/fixtures/contract_history
@@ -77,7 +77,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "contract_history" / "HITI261016P
 class TestParseShape:
     def test_row_count(self):
         rows = parse_history_csv(FIXTURE)
-        assert len(rows) == 123
+        assert len(rows) == 124
 
     def test_returns_history_rows(self):
         rows = parse_history_csv(FIXTURE)
@@ -1217,10 +1217,10 @@ async def test_syncs_open_position(db):
     assert summary.contracts_total == 1
     assert summary.synced == 1
     assert summary.failed == 0
-    assert summary.rows_upserted == 123
+    assert summary.rows_upserted == 124
 
     count = (await db.execute(select(func.count()).select_from(ContractHistory))).scalar()
-    assert count == 123
+    assert count == 124
 
 
 @pytest.mark.asyncio
@@ -1245,7 +1245,7 @@ async def test_records_success_status(db):
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
     assert status.last_success_at is not None
     assert status.last_error is None
-    assert status.row_count == 123
+    assert status.row_count == 124
 
 
 @pytest.mark.asyncio
@@ -1313,7 +1313,7 @@ async def test_ttl_skips_recent_sync(db):
     db.add(ContractHistorySync(
         contract_id=c.id,
         last_success_at=datetime.utcnow() - timedelta(hours=1),
-        row_count=123,
+        row_count=124,
     ))
     await db.commit()
 
@@ -1328,7 +1328,7 @@ async def test_force_overrides_ttl(db):
     db.add(ContractHistorySync(
         contract_id=c.id,
         last_success_at=datetime.utcnow() - timedelta(hours=1),
-        row_count=123,
+        row_count=124,
     ))
     await db.commit()
 
