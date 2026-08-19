@@ -35,9 +35,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-ra --strict-markers --tb=short"
+addopts = "-ra --strict-markers --tb=short -m 'not live'"
 filterwarnings = ["ignore::DeprecationWarning"]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live: requires network, valid Stocknear cookies, and a subscription (deselected by default)",
+]
 
 [tool.mypy]
 python_version = "3.12"
