@@ -200,33 +200,57 @@ document.addEventListener('DOMContentLoaded', function() {
 {% endif %}
 
 <script>
+// Builds a <span style="color: ...">text</span> with `text` assigned via
+// textContent, never innerHTML — some of the strings shown here (contract
+// sync errors) can carry a URL the *remote* Stocknear site chose via an
+// unexpected redirect, so they must never be parsed as markup.
+function coloredSpan(text, color) {
+    const span = document.createElement('span');
+    span.style.color = color;
+    span.textContent = text;
+    return span;
+}
+
 async function syncContractHistory() {
     const btn = document.getElementById('sync-history-btn');
     const statusEl = document.getElementById('sync-history-status');
     btn.disabled = true;
-    statusEl.innerHTML = '<span style="color: #888;">Syncing — this can take a minute for a large book…</span>';
+    statusEl.replaceChildren(coloredSpan('Syncing — this can take a minute for a large book…', '#888'));
 
     try {
         const res = await fetch('/api/contract-history/sync', {method: 'POST'});
         if (!res.ok) {
             const err = await res.json().catch(() => ({detail: res.statusText}));
-            statusEl.innerHTML = `<span style="color: #ef4444;">${err.detail || 'Sync failed'}</span>`;
+            statusEl.replaceChildren(coloredSpan(err.detail || 'Sync failed', '#ef4444'));
             return;
         }
         const data = await res.json();
-        let html = `<span style="color: #22c55e;">${data.synced} synced</span>, ` +
-                    `${data.skipped} skipped, ` +
-                    `<span style="color: ${data.failed ? '#ef4444' : '#888'};">${data.failed} failed</span>, ` +
-                    `${data.rows_upserted} rows upserted`;
+
+        const nodes = [
+            coloredSpan(`${data.synced} synced`, '#22c55e'),
+            document.createTextNode(`, ${data.skipped} skipped, `),
+            coloredSpan(`${data.failed} failed`, data.failed ? '#ef4444' : '#888'),
+            document.createTextNode(`, ${data.rows_upserted} rows upserted`),
+        ];
+
         if (data.errors && data.errors.length) {
-            const items = data.errors.map(e =>
-                `<li><strong>${e.contract}</strong>: ${e.error}</li>`
-            ).join('');
-            html += `<ul style="margin: 0.5rem 0 0 1rem; color: #ef4444;">${items}</ul>`;
+            const ul = document.createElement('ul');
+            ul.style.margin = '0.5rem 0 0 1rem';
+            ul.style.color = '#ef4444';
+            for (const e of data.errors) {
+                const li = document.createElement('li');
+                const strong = document.createElement('strong');
+                strong.textContent = e.contract;
+                li.appendChild(strong);
+                li.append(': ' + e.error);
+                ul.appendChild(li);
+            }
+            nodes.push(ul);
         }
-        statusEl.innerHTML = html;
+
+        statusEl.replaceChildren(...nodes);
     } catch (e) {
-        statusEl.innerHTML = `<span style="color: #ef4444;">Sync failed: ${e.message}</span>`;
+        statusEl.replaceChildren(coloredSpan('Sync failed: ' + e.message, '#ef4444'));
     } finally {
         btn.disabled = false;
     }
