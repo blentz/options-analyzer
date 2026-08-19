@@ -124,3 +124,32 @@ class TestVulnerabilityFixes:
         # Verify it's a ContractHistoryError, not AttributeError
         assert isinstance(exc.value, ContractHistoryError)
         assert "non-empty string" in str(exc.value).lower()
+
+    def test_rejects_repeated_contract_param_requested_first(self):
+        """URL with repeated contract parameter: requested value first.
+
+        Vulnerability: Taking the first value silently discards others.
+        When URL has ?contract=<requested>&contract=<substituted>,
+        the guard would pass because it takes the first value.
+        This is the exact "echo the wanted value, serve something else"
+        pattern that needs to be closed.
+        Fix: reject any URL with multiple contract parameters.
+        """
+        url = f"https://www.stocknear.com/stocks/HITI/options/contract-lookup?contract={WANTED}&contract=HITI260821P00002500"
+        with pytest.raises(ProGatedError) as exc:
+            verify_contract_served(WANTED, url, "Contract History")
+        assert "multiple contract parameters" in str(exc.value).lower()
+
+    def test_rejects_repeated_contract_param_substituted_first(self):
+        """URL with repeated contract parameter: substituted value first.
+
+        This ordering correctly raises today, but we test it to ensure
+        the fix (requiring exactly one parameter) continues to reject it.
+        When URL has ?contract=<substituted>&contract=<requested>,
+        the first value is wrong, so it correctly raises. But the fix
+        should reject based on parameter count, not value order.
+        """
+        url = f"https://www.stocknear.com/stocks/HITI/options/contract-lookup?contract=HITI260821P00002500&contract={WANTED}"
+        with pytest.raises(ProGatedError) as exc:
+            verify_contract_served(WANTED, url, "Contract History")
+        assert "multiple contract parameters" in str(exc.value).lower()

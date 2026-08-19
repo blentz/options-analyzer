@@ -256,15 +256,24 @@ def verify_contract_served(
     parsed = urlparse(page_url or "")
     params = parse_qs(parsed.query)
 
-    # parse_qs returns lists of values; get first element if present
-    served_contract = params.get("contract", [None])[0]
+    # parse_qs returns lists of values; require exactly one contract parameter.
+    # If there are multiple contract parameters, we cannot determine which one
+    # the server actually rendered, so we must reject the ambiguity.
+    values = params.get("contract", [])
 
-    if served_contract is None:
+    if len(values) == 0:
         raise ProGatedError(
             f"Page URL has no contract parameter. "
             f"Cannot confirm which contract was served: {page_url!r}"
         )
 
+    if len(values) > 1:
+        raise ProGatedError(
+            f"Page URL has multiple contract parameters: {values}. "
+            f"Cannot determine which contract was served: {page_url!r}"
+        )
+
+    served_contract = values[0]
     served_contract_lower = served_contract.lower()
 
     if served_contract_lower != wanted:
