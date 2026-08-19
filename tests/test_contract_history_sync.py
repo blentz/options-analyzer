@@ -278,6 +278,73 @@ async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, t
 
 
 @pytest.mark.asyncio
+async def test_invalid_symbol_is_isolated_and_does_not_abort_batch(db):
+    """occ_symbol() raises for a ticker it cannot turn into a valid OCC
+    symbol (e.g. a dotted ticker like "BRK.B") -- and does so BEFORE any
+    download is attempted, while building job_meta. Without its own
+    per-contract isolation, that raise would escape the job_meta
+    construction and abort the whole sync call, leaving every other due
+    contract -- including ones that would have synced fine -- with
+    nothing recorded. Same failure shape N1 fixed for a batch-level
+    browser failure, reintroduced through a different door.
+    """
+    good = await _open_position(db, symbol="AAA", strike="1.00", exp=date(2026, 10, 16))
+    bad = await _open_position(db, symbol="BRK.B", strike="2.00", exp=date(2026, 10, 16))
+    await db.commit()
+
+    # A rollback anywhere in sync_open_positions expires every object this
+    # session tracks, so anything needed after the call must be captured
+    # as a plain value now (see the identical note on the "duplicate
+    # date" test above).
+    good_id = good.id
+    bad_id = bad.id
+
+    def only_good(symbol, occ_symbol, dest_dir):
+        # The bad contract must never reach the downloader at all -- it
+        # fails before job_meta is even built.
+        assert symbol == "AAA"
+        return FIXTURE
+
+    summary = await sync_open_positions(db, downloader=only_good)
+
+    assert summary.contracts_total == 2
+    assert summary.synced == 1
+    assert summary.failed == 1
+    assert len(summary.errors) == 1
+    assert "BRK.B" in summary.errors[0].error
+
+    good_status = (
+        await db.execute(
+            select(ContractHistorySync).where(
+                ContractHistorySync.contract_id == good_id
+            )
+        )
+    ).scalar_one()
+    assert good_status.last_success_at is not None
+    assert good_status.last_error is None
+
+    bad_status = (
+        await db.execute(
+            select(ContractHistorySync).where(
+                ContractHistorySync.contract_id == bad_id
+            )
+        )
+    ).scalar_one()
+    assert bad_status.last_success_at is None
+    assert bad_status.last_error is not None
+    assert "BRK.B" in bad_status.last_error
+
+    good_history_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(ContractHistory)
+            .where(ContractHistory.contract_id == good_id)
+        )
+    ).scalar()
+    assert good_history_count == 124
+
+
+@pytest.mark.asyncio
 async def test_ttl_skips_recent_sync(db):
     c = await _open_position(db)
     db.add(ContractHistorySync(

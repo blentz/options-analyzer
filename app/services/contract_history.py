@@ -464,7 +464,41 @@ async def sync_open_positions(
         # await raises MissingGreenlet under the async driver. Plain
         # (id, symbol, occ) tuples sidestep that entirely: nothing below
         # ever reads an attribute off a `due` contract again.
-        job_meta = [(c.id, c.symbol, occ_symbol(c)) for c in due]
+        #
+        # occ_symbol(c) can raise (e.g. a dotted ticker like "BRK.B" does
+        # not fit the OCC shape) -- and does so BEFORE any download is
+        # attempted, so this failure must be isolated per contract just
+        # like a download or parse failure is. A bare list comprehension
+        # here would let one bad symbol raise out of the comprehension and
+        # abort the whole sync call, leaving every other due contract with
+        # nothing recorded -- the same failure shape N1 fixed for a
+        # batch-level browser failure, reintroduced through a different
+        # door. commit()ing this contract's status immediately (rather
+        # than batching it with the loop below) keeps it consistent with
+        # every other per-contract failure path in this function.
+        job_meta: list[tuple[int, str, str]] = []
+        for c in due:
+            try:
+                occ = occ_symbol(c)
+            except Exception as e:
+                contract_label = c.contract_id  # e.g. "BRK.B 10/16/26 $250.00 PUT"
+                status = await _get_or_create_status(db, c.id)
+                status.last_attempt_at = now
+                status.last_error = (
+                    f"Could not build a valid OCC symbol for {contract_label}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                await db.commit()
+                summary.failed += 1
+                summary.errors.append(SyncError(contract=contract_label, error=status.last_error))
+                continue
+            job_meta.append((c.id, c.symbol, occ))
+
+        if not job_meta:
+            # Every due contract failed symbol construction -- nothing
+            # left to download. Skip the (otherwise wasted) browser launch.
+            return summary
+
         jobs = [(symbol, occ) for _, symbol, occ in job_meta]
 
         if downloader is None:
