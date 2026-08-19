@@ -11,6 +11,14 @@ If this test raises ProGatedError, that is NOT a test failure: it means the
 configured subscription tier does not cover this contract's expiration, and
 it means the substitution guard is working correctly. Do not go debugging
 the download code over it -- check the subscription tier instead.
+
+MAINTENANCE: the contract below (HITI261016P00002500) expires 2026-10-16.
+On or after that date this test will fail (or raise ProGatedError) simply
+because the contract no longer exists, regardless of session or
+subscription validity -- update CONTRACT/SYMBOL below to a currently live
+expiration. Any contract with an open position and a live expiration works
+as a replacement; the row-count assertion is a floor (> 50), not an exact
+figure, precisely so a substitute doesn't need identical data.
 """
 
 import tempfile
