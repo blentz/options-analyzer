@@ -72,6 +72,19 @@ The profile is mounted read-only: the cookie reader copies `cookies.sqlite`
 to a temporary directory before opening it, so it never needs write access
 to your live browser data.
 
+**SELinux note.** The profile mount uses `:ro,Z`. The `Z` relabels the
+profile directory on the host to `container_file_t` with per-container MCS
+categories, and that change persists after the container exits — `:ro`
+constrains the container's writes, not podman's relabelling of the source.
+Without it the mount is unreadable under enforcing SELinux and fails
+quietly: the reader reports no cookies found and every sync fails
+authentication, which looks identical to an expired session. Firefox runs
+unconfined and keeps access to the relabelled profile. To undo:
+
+```bash
+restorecon -R ~/.mozilla/firefox/<profile>
+```
+
 Starting without `.env` or without a profile works, but the app runs
 degraded — it warns on startup, StockNear data falls back to cache, and
 contract-history sync fails to authenticate.

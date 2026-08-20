@@ -30,13 +30,25 @@ build_run_args() {
     fi
 
     if [ -d "$BROWSER_PROFILE" ]; then
-        # Deliberately :ro with NO :z/:Z. Both of those relabel the SOURCE
-        # directory, which for a live browser profile means writing SELinux
-        # labels onto your running Firefox's data — a real risk of breaking
-        # the browser itself. If SELinux denies this mount, that is a visible
-        # failure to fix explicitly, not something to paper over by
-        # relabelling ~/.mozilla behind your back.
-        RUN_ARGS+=(-v "$BROWSER_PROFILE:/app/browser-profile:ro")
+        # :ro,Z — both parts are load-bearing, and neither is the default.
+        #
+        # :ro is the container's access. The cookie reader copies
+        # cookies.sqlite to a temp dir before opening it, so it never needs
+        # to write here.
+        #
+        # :Z relabels the SOURCE on the host — persistently, and with fresh
+        # per-container MCS categories on every `podman run`. Without it the
+        # mount is unreadable under enforcing SELinux (a profile carries
+        # user_home_t; the container gets EACCES) and the failure is quiet:
+        # the reader logs "cookies.sqlite not found" and every sync fails
+        # auth for what looks like an expired session.
+        #
+        # Note :ro does NOT prevent the relabel — it constrains the
+        # container's writes, not podman's labelling of the source. Firefox
+        # runs unconfined_t and keeps access to container_file_t, so this
+        # does not break the browser. Undo with:
+        #     restorecon -R "$BROWSER_PROFILE"
+        RUN_ARGS+=(-v "$BROWSER_PROFILE:/app/browser-profile:ro,Z")
         # Must come AFTER --env-file so it overrides the host-side path that
         # .env may carry. The container sees the mount point, not the host path.
         RUN_ARGS+=(-e "STOCKNEAR_BROWSER_PROFILE_PATH=/app/browser-profile")
