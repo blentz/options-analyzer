@@ -1,6 +1,7 @@
 """Mapping tests for the stock-quote and expirations fetchers."""
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,25 @@ FIXTURES = Path(__file__).parent / "fixtures" / "stocknear_mcp"
 
 def _load(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
+
+
+# fetch_expirations drops rows before today, so any test asserting an exact
+# expiration list depends on what "today" is. Three of these tests hardcoded
+# 2026-08-17 as a future date and started failing the day it went past — the
+# production filter was correct, the tests had simply rotted. Pinning today
+# keeps them about sorting, dedup and filtering rather than about the calendar.
+FROZEN_TODAY = date(2026, 8, 1)
+
+
+@pytest.fixture
+def frozen_today(monkeypatch):
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return FROZEN_TODAY
+
+    monkeypatch.setattr(stocknear_mcp, "date", _FixedDate)
+    return FROZEN_TODAY
 
 
 def _stub_call_tool(monkeypatch, payload):
@@ -67,7 +87,7 @@ async def test_fetch_stock_overview_keeps_missing_market_cap_as_none(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_fetch_expirations_returns_sorted_dates(monkeypatch):
+async def test_fetch_expirations_returns_sorted_dates(monkeypatch, frozen_today):
     _stub_call_tool(monkeypatch, _load("options_overview_aapl.json"))
 
     expirations = await fetch_expirations("AAPL")
@@ -76,7 +96,7 @@ async def test_fetch_expirations_returns_sorted_dates(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_expirations_sorts_unordered_table(monkeypatch):
+async def test_fetch_expirations_sorts_unordered_table(monkeypatch, frozen_today):
     _stub_call_tool(monkeypatch, {"AAPL": {"table": [
         {"expiration": "2026-10-16"},
         {"expiration": "2026-08-17"},
@@ -86,7 +106,7 @@ async def test_fetch_expirations_sorts_unordered_table(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_expirations_deduplicates(monkeypatch):
+async def test_fetch_expirations_deduplicates(monkeypatch, frozen_today):
     _stub_call_tool(monkeypatch, {"AAPL": {"table": [
         {"expiration": "2026-08-17"},
         {"expiration": "2026-08-17"},
@@ -126,3 +146,29 @@ async def test_fetch_stock_overview_stores_raw_payload(monkeypatch):
     data = await fetch_stock_overview("AAPL")
 
     assert json.loads(data.raw_content) == payload["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_expirations_drops_past_dates(monkeypatch, frozen_today):
+    """Expirations before today are filtered out.
+
+    This is the behaviour that broke the three tests above when their
+    hardcoded dates went past — it was the one thing they never asserted.
+    """
+    _stub_call_tool(monkeypatch, {"AAPL": {"table": [
+        {"expiration": "2026-07-31"},   # day before frozen today
+        {"expiration": "2026-08-01"},   # frozen today — inclusive
+        {"expiration": "2026-09-18"},
+    ]}})
+
+    assert await fetch_expirations("AAPL") == ["2026-08-01", "2026-09-18"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_expirations_skips_unparseable_dates(monkeypatch, frozen_today):
+    _stub_call_tool(monkeypatch, {"AAPL": {"table": [
+        {"expiration": "not-a-date"},
+        {"expiration": "2026-09-18"},
+    ]}})
+
+    assert await fetch_expirations("AAPL") == ["2026-09-18"]
