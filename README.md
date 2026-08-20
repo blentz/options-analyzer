@@ -41,18 +41,44 @@ uv run pytest
 
 ## Running with Podman
 
+`run.sh` is the supported entry point — it wires up configuration and the
+browser profile mount, which a bare `podman run` does not.
+
 ```bash
-# Build the container
-podman build -t options-analyzer .
-
-# Run with persistent data
-podman run -d --name options-analyzer \
-  -p 8000:8000 \
-  -v ./data:/app/data \
-  options-analyzer
-
-# Access at http://localhost:8000
+cp .env.example .env      # then fill in STOCKNEAR_MCP_TOKEN
+./run.sh build
+./run.sh start            # http://localhost:8000
+./run.sh logs
 ```
+
+Point it at a different browser profile with:
+
+```bash
+BROWSER_PROFILE=~/.librewolf/abcd1234.default ./run.sh start
+```
+
+### What gets mounted, and why
+
+Configuration is **passed in at runtime, never baked into the image**.
+`.containerignore` excludes `.env` from the build context because it holds
+`STOCKNEAR_MCP_TOKEN`, and an image layer keeps a secret forever.
+
+| Mount | Mode | Purpose |
+|---|---|---|
+| `./data` → `/app/data` | read-write | SQLite database, persisted across rebuilds |
+| browser profile → `/app/browser-profile` | **read-only** | `cookies.sqlite`, for the authenticated StockNear scraper |
+
+The profile is mounted read-only: the cookie reader copies `cookies.sqlite`
+to a temporary directory before opening it, so it never needs write access
+to your live browser data.
+
+Starting without `.env` or without a profile works, but the app runs
+degraded — it warns on startup, StockNear data falls back to cache, and
+contract-history sync fails to authenticate.
+
+Running the app directly instead (`uv run uvicorn app.main:app --reload`)
+requires `DATABASE_PATH` and `STOCKNEAR_BROWSER_PROFILE_PATH` in `.env` to
+be **host** paths; the defaults in `.env.example` are container paths.
 
 ## Project Structure
 
@@ -67,11 +93,15 @@ podman run -d --name options-analyzer \
 │       ├── analytics.py     # Statistics and reporting
 │       ├── risk_analysis.py # Options payoff calculations
 │       ├── price_service.py # Yahoo Finance price fetching
-│       └── stocknear_mcp.py # StockNear MCP client (symbol-level data)
+│       ├── stocknear_mcp.py # StockNear MCP client (symbol-level data)
+│       └── contract_history.py # Contract-history CSV ingest and sync
 ├── templates/               # Jinja2 HTML templates
+├── migrations/              # Alembic migrations
 ├── data/                    # SQLite database (persistent volume)
-├── Dockerfile
-└── requirements.txt
+├── Containerfile
+├── run.sh                   # Container build/start/stop helper
+├── .env.example             # Configuration template
+└── pyproject.toml           # Dependencies (uv / uv.lock)
 ```
 
 ## Data Model

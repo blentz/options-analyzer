@@ -58,19 +58,21 @@ Win/loss determination uses `total_pnl` to account for assignment outcomes.
 ## Testing Changes
 
 ```bash
-# Rebuild container after code changes
-podman build -t options-analyzer .
-
-# Restart with new image
-podman rm -f options-analyzer
-podman run -d --name options-analyzer -p 8000:8000 -v ./data:/app/data options-analyzer
-
-# Check logs
-podman logs options-analyzer
+# Rebuild and restart. Use run.sh, not a bare `podman run` — it passes
+# --env-file and mounts the browser profile read-only at
+# /app/browser-profile. A hand-written `podman run` omits both, and the
+# container silently starts unauthenticated: StockNear data degrades to
+# cache and contract-history sync fails every contract.
+./run.sh build
+./run.sh restart          # forced recreate, picks up the new image
+./run.sh logs
 
 # Test endpoints
 curl http://localhost:8000/api/stats
 ```
+
+The container is named `finance-tracker` (see `run.sh`), matching the
+project name in `pyproject.toml`.
 
 ## File Purposes
 

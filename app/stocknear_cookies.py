@@ -42,6 +42,27 @@ def extract_browser_cookies(profile_path: str, domain_filter: str = "stocknear.c
         except Exception:
             pass
 
+        # Firefox journals cookies.sqlite in WAL mode. While the browser is
+        # running, recently-written cookies sit in the -wal sidecar and have
+        # not been checkpointed into the main file yet — so copying only
+        # cookies.sqlite silently misses them. That is the worst case for us:
+        # the cookie most likely to be uncheckpointed is the session cookie
+        # from a login the user just performed, and its absence looks
+        # identical to expired auth downstream.
+        #
+        # -shm is deliberately NOT copied: it is a regenerable shared-memory
+        # index, and SQLite rebuilds it when it opens the copy. Carrying a
+        # stale one over is a liability, not a help.
+        wal = cookies_db.with_name(cookies_db.name + "-wal")
+        if wal.exists():
+            wal_copy = tmp_path.with_name(tmp_path.name + "-wal")
+            shutil.copy(wal, wal_copy)
+            try:
+                wal_copy.chmod(0o600)
+            except Exception:
+                pass
+            logger.debug("Copied WAL sidecar (%d bytes)", wal.stat().st_size)
+
         conn = sqlite3.connect(str(tmp_path))
         try:
             cursor = conn.cursor()

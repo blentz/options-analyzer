@@ -7,6 +7,46 @@ CONTAINER_NAME="finance-tracker"
 IMAGE_NAME="finance-tracker:latest"
 PORT=8000
 
+# Runtime configuration is passed in, never baked into the image: .env holds
+# STOCKNEAR_MCP_TOKEN, and an image layer is forever. .containerignore
+# excludes it from the build context for that reason.
+ENV_FILE="${ENV_FILE:-.env}"
+
+# Host browser profile whose cookies authenticate the StockNear scraper.
+# Mounted read-only — the reader copies cookies.sqlite to a temp dir before
+# opening it, so it never needs write access to your profile.
+BROWSER_PROFILE="${BROWSER_PROFILE:-$HOME/.mozilla/firefox/rtzwitzk.default-release}"
+
+# Assemble the `podman run` arguments shared by both start paths below.
+# Populates the global RUN_ARGS array.
+build_run_args() {
+    RUN_ARGS=(-d --name "$CONTAINER_NAME" -p "$PORT:8000" -v ./data:/app/data:Z)
+
+    if [ -f "$ENV_FILE" ]; then
+        RUN_ARGS+=(--env-file "$ENV_FILE")
+    else
+        echo "Note: $ENV_FILE not found — starting on built-in defaults." >&2
+        echo "      StockNear data will be unauthenticated and degrade to cache." >&2
+    fi
+
+    if [ -d "$BROWSER_PROFILE" ]; then
+        # Deliberately :ro with NO :z/:Z. Both of those relabel the SOURCE
+        # directory, which for a live browser profile means writing SELinux
+        # labels onto your running Firefox's data — a real risk of breaking
+        # the browser itself. If SELinux denies this mount, that is a visible
+        # failure to fix explicitly, not something to paper over by
+        # relabelling ~/.mozilla behind your back.
+        RUN_ARGS+=(-v "$BROWSER_PROFILE:/app/browser-profile:ro")
+        # Must come AFTER --env-file so it overrides the host-side path that
+        # .env may carry. The container sees the mount point, not the host path.
+        RUN_ARGS+=(-e "STOCKNEAR_BROWSER_PROFILE_PATH=/app/browser-profile")
+    else
+        echo "Note: browser profile not found at $BROWSER_PROFILE" >&2
+        echo "      Contract-history sync and contract quotes will fail to authenticate." >&2
+        echo "      Set BROWSER_PROFILE=/path/to/profile to override." >&2
+    fi
+}
+
 case "$1" in
     build)
         echo "Building container image..."
@@ -27,12 +67,14 @@ case "$1" in
                 echo "Recreating container — image SHA differs (current=${current_image_sha:0:12}, container=${container_image_sha:0:12})."
                 podman stop $CONTAINER_NAME 2>/dev/null || true
                 podman rm $CONTAINER_NAME
-                podman run -d --name $CONTAINER_NAME -p $PORT:8000 -v ./data:/app/data:Z $IMAGE_NAME
+                build_run_args
+                podman run "${RUN_ARGS[@]}" "$IMAGE_NAME"
             else
                 podman start $CONTAINER_NAME
             fi
         else
-            podman run -d --name $CONTAINER_NAME -p $PORT:8000 -v ./data:/app/data:Z $IMAGE_NAME
+            build_run_args
+            podman run "${RUN_ARGS[@]}" "$IMAGE_NAME"
         fi
         echo "Application running at http://localhost:$PORT"
         ;;
