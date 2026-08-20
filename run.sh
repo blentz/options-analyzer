@@ -20,7 +20,21 @@ BROWSER_PROFILE="${BROWSER_PROFILE:-$HOME/.mozilla/firefox/rtzwitzk.default-rele
 # Assemble the `podman run` arguments shared by both start paths below.
 # Populates the global RUN_ARGS array.
 build_run_args() {
-    RUN_ARGS=(-d --name "$CONTAINER_NAME" -p "$PORT:8000" -v ./data:/app/data:Z)
+    # The bind-mount source must exist first. If podman creates it, it lands
+    # owned by the host user — which rootless podman maps to container UID 0,
+    # while the image runs as app (UID 1000). The container then cannot write
+    # its own database and startup dies with "unable to open database file".
+    mkdir -p ./data
+
+    # --userns=keep-id maps the host user to the same UID inside the
+    # container, so app (1000) lines up with the host account that owns
+    # ./data. Without it the volume is unwritable.
+    #
+    # The alternative, mounting :U, works too but recursively chowns ./data
+    # to a subuid — your own database would stop being yours on the host,
+    # awkward to inspect or back up. keep-id leaves the files owned by you.
+    RUN_ARGS=(-d --name "$CONTAINER_NAME" -p "$PORT:8000" --userns=keep-id
+              -v ./data:/app/data:Z)
 
     if [ -f "$ENV_FILE" ]; then
         RUN_ARGS+=(--env-file "$ENV_FILE")
@@ -88,7 +102,10 @@ case "$1" in
             build_run_args
             podman run "${RUN_ARGS[@]}" "$IMAGE_NAME"
         fi
-        echo "Application running at http://localhost:$PORT"
+        # 127.0.0.1, not localhost: podman's pasta backend forwards IPv4 only,
+        # and localhost resolves to ::1 first on many hosts — which just
+        # refuses the connection while the app is perfectly healthy.
+        echo "Application running at http://127.0.0.1:$PORT"
         ;;
     stop)
         echo "Stopping container..."

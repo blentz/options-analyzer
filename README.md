@@ -47,9 +47,13 @@ browser profile mount, which a bare `podman run` does not.
 ```bash
 cp .env.example .env      # then fill in STOCKNEAR_MCP_TOKEN
 ./run.sh build
-./run.sh start            # http://localhost:8000
+./run.sh start            # http://127.0.0.1:8000
 ./run.sh logs
 ```
+
+Use `127.0.0.1`, not `localhost`. Podman's pasta backend forwards IPv4
+only, and on hosts where `localhost` resolves to `::1` first the connection
+is simply refused while the app is perfectly healthy.
 
 Point it at a different browser profile with:
 
@@ -71,6 +75,13 @@ Configuration is **passed in at runtime, never baked into the image**.
 The profile is mounted read-only: the cookie reader copies `cookies.sqlite`
 to a temporary directory before opening it, so it never needs write access
 to your live browser data.
+
+**One container at a time per volume.** Both mounts use `Z`, which assigns
+*private* per-container SELinux categories. Running a second container
+against `./data` — a one-off `podman run` for debugging, say — relabels it
+with that container's categories and locks the running app out, producing
+`unable to open database file` from a container that was working moments
+before. `./run.sh restart` fixes it by relabelling to match.
 
 **SELinux note.** The profile mount uses `:ro,Z`. The `Z` relabels the
 profile directory on the host to `container_file_t` with per-container MCS
