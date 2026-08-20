@@ -63,14 +63,6 @@
        class="btn {% if show_closed_only %}btn-primary{% else %}btn-secondary{% endif %}">Closed Only</a>
 </div>
 
-<div style="margin: 1rem 0; display: flex; align-items: center; gap: 0.75rem;">
-    <button id="sync-history-btn" class="btn btn-secondary" onclick="syncContractHistory()"
-            title="Download contract price history for every open position. Runs a real browser session — expect roughly 15s plus 2-4s per open position.">
-        Sync History
-    </button>
-    <span id="sync-history-status" style="font-size: 0.85rem; color: #888;"></span>
-</div>
-
 {% if positions %}
 <table id="positions-table">
     <thead>
@@ -135,9 +127,9 @@
                         {# Truncated only -- never the full text, even via a
                            title attribute. last_error can carry a URL the
                            *remote* Stocknear site chose via an unexpected
-                           redirect (see syncContractHistory()'s JS comment
-                           on the same risk), so it is kept short and never
-                           echoed back in full. #}
+                           redirect (SpecApp.syncHistory() guards the same
+                           risk on the speculation page), so it is kept short
+                           and never echoed back in full. #}
                         {% set err_short = (status.last_error[:80] + '…') if status.last_error|length > 80 else status.last_error %}
                         <br>
                         <span style="color: #ef4444;">{{ err_short }}</span>
@@ -228,59 +220,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <script>
 // Builds a <span style="color: ...">text</span> with `text` assigned via
-// textContent, never innerHTML — some of the strings shown here (contract
-// sync errors) can carry a URL the *remote* Stocknear site chose via an
-// unexpected redirect, so they must never be parsed as markup.
-function coloredSpan(text, color) {
-    const span = document.createElement('span');
-    span.style.color = color;
-    span.textContent = text;
-    return span;
-}
 
-async function syncContractHistory() {
-    const btn = document.getElementById('sync-history-btn');
-    const statusEl = document.getElementById('sync-history-status');
-    btn.disabled = true;
-    statusEl.replaceChildren(coloredSpan('Syncing — this can take a minute for a large book…', '#888'));
-
-    try {
-        const res = await fetch('/api/contract-history/sync', {method: 'POST'});
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({detail: res.statusText}));
-            statusEl.replaceChildren(coloredSpan(err.detail || 'Sync failed', '#ef4444'));
-            return;
-        }
-        const data = await res.json();
-
-        const nodes = [
-            coloredSpan(`${data.synced} synced`, '#22c55e'),
-            document.createTextNode(`, ${data.skipped} skipped, `),
-            coloredSpan(`${data.failed} failed`, data.failed ? '#ef4444' : '#888'),
-            document.createTextNode(`, ${data.rows_upserted} rows upserted`),
-        ];
-
-        if (data.errors && data.errors.length) {
-            const ul = document.createElement('ul');
-            ul.style.margin = '0.5rem 0 0 1rem';
-            ul.style.color = '#ef4444';
-            for (const e of data.errors) {
-                const li = document.createElement('li');
-                const strong = document.createElement('strong');
-                strong.textContent = e.contract;
-                li.appendChild(strong);
-                li.append(': ' + e.error);
-                ul.appendChild(li);
-            }
-            nodes.push(ul);
-        }
-
-        statusEl.replaceChildren(...nodes);
-    } catch (e) {
-        statusEl.replaceChildren(coloredSpan('Sync failed: ' + e.message, '#ef4444'));
-    } finally {
-        btn.disabled = false;
-    }
-}
 </script>
 {% endblock %}

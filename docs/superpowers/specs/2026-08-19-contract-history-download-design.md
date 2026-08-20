@@ -57,10 +57,28 @@ feature and is addressed in Error Handling below.
 
 ## Decisions
 
-1. **Open positions only.** The sync set is contracts with an open position.
-   Watchlist and research contracts are out of scope; `option_contracts` has
-   no representation for a contract that was never traded, and adding one is
-   not justified by present need.
+1. **Open positions, plus contracts named by the caller.** The sync set is
+   contracts with an open position, together with any contracts the caller
+   names explicitly — in practice the legs loaded in the speculation page's
+   strategy builder. Contracts appearing in both are synced once.
+
+   This decision was originally "open positions only," on the grounds that
+   `option_contracts` had no representation for a contract that was never
+   traded. It was revised once the sync moved to the speculation page: that
+   page exists to analyze contracts the user does *not* hold, so a
+   positions-only sync would have collected history for everything except
+   what was on screen.
+
+   Naming a contract that has no row creates one. That widens what
+   `option_contracts` means, from "contracts you have traded" to "contracts
+   you have traded or researched" — the watchlist concept this spec
+   originally cut, arriving by a narrower route. It is safe because
+   `update_position()` returns early for a contract with no trades and
+   `get_positions()` joins `OptionPosition`, so a researched contract never
+   surfaces as a phantom position.
+
+   The caller names individual contracts, never a whole chain. A chain is
+   100-500 contracts at 2-4 seconds each; a strategy is one to four.
 2. **Full fidelity storage.** All 34 columns persist to a typed table, one row
    per (contract, date). Storing a queryable subset would discard exactly the
    second-order greeks that make historical pricing analysis worth doing, and
@@ -171,10 +189,18 @@ and `/api/cycles/rebuild`, which establish the pattern of a user-triggered,
 idempotent maintenance action returning a summary. Returns
 `{contracts_total, synced, skipped, failed, rows_upserted, errors[]}`.
 
-### `templates/positions.html` — sync button
+### `templates/speculation.html` — sync button
 
-Posts to the endpoint and renders the summary. Per-contract `last_success_at`
-and `last_error` display on the position rows.
+Posts the strategy builder's current legs to the endpoint and renders the
+summary, listing each failed contract individually. The button lives here
+rather than on the positions page because this is where the resulting
+history is meant to feed price analysis and forecasting.
+
+### `templates/positions.html` — sync status
+
+Per-contract `last_success_at` and `last_error` display on the position
+rows. The trigger is not here; held contracts are listed here, so this is
+where their sync state belongs.
 
 ### `app/config.py`
 

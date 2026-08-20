@@ -1,0 +1,229 @@
+- generic [ref=e2]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - button "Toggle Menu" [ref=e7] [cursor=pointer]
+      - link "Stocknear Logo Stocknear" [ref=e10] [cursor=pointer]:
+        - /url: /
+        - img "Stocknear Logo" [ref=e11]
+        - generic [ref=e12]: Stocknear
+      - generic [ref=e13]:
+        - generic [ref=e18]:
+          - combobox "Company or stock symbol..." [ref=e22]
+          - generic [ref=e23]:
+            - generic:
+              - generic: ctrl
+              - generic: K
+        - link "Sign up" [ref=e25] [cursor=pointer]:
+          - /url: /register
+        - link "Log in" [ref=e27] [cursor=pointer]:
+          - /url: /login
+    - main [ref=e31]:
+      - main [ref=e34]:
+        - generic [ref=e41]:
+          - generic [ref=e42]:
+            - generic [ref=e45]:
+              - button "Watchlist" [ref=e46] [cursor=pointer]
+              - checkbox
+              - generic "Alert" [ref=e49] [cursor=pointer]
+              - link "Pro Chart" [ref=e55] [cursor=pointer]:
+                - /url: /chart/HITI
+              - button "Export Price" [ref=e59] [cursor=pointer]
+              - checkbox "Close modal"
+              - option "1 Hour"
+              - option "30 Min"
+              - option "15 Min" [selected]
+              - option "5 Min"
+              - option "1 Min"
+            - generic [ref=e65]:
+              - generic [ref=e67]:
+                - heading "High Tide Inc. (HITI)" [level=1] [ref=e68]:
+                  - text: High Tide Inc.
+                  - generic [ref=e69]: (HITI)
+                - generic [ref=e70]: "NASDAQ: HITI · Real-Time Price · USD"
+              - generic [ref=e72]:
+                - generic [ref=e73]: "2.46"
+                - generic [ref=e74]: +0.06 (2.50%)
+                - generic [ref=e75]: Aug 19, 2026, 2:49 PM - Market open
+          - navigation [ref=e76]:
+            - list [ref=e77]:
+              - link "Overview" [ref=e78] [cursor=pointer]:
+                - /url: /stocks/HITI
+              - link "Financials" [ref=e79] [cursor=pointer]:
+                - /url: /stocks/HITI/financials
+              - link "Statistics" [ref=e80] [cursor=pointer]:
+                - /url: /stocks/HITI/statistics
+              - link "Metrics" [ref=e81] [cursor=pointer]:
+                - /url: /stocks/HITI/metrics
+              - link "Forecast" [ref=e82] [cursor=pointer]:
+                - /url: /stocks/HITI/forecast
+              - link "Unusual Orders" [ref=e83] [cursor=pointer]:
+                - /url: /stocks/HITI/unusual-orders
+              - link "Options" [ref=e84] [cursor=pointer]:
+                - /url: /stocks/HITI/options
+              - link "Insider" [ref=e85] [cursor=pointer]:
+                - /url: /stocks/HITI/insider
+              - link "History" [ref=e86] [cursor=pointer]:
+                - /url: /stocks/HITI/history
+              - link "Profile" [ref=e87] [cursor=pointer]:
+                - /url: /stocks/HITI/profile
+          - main [ref=e92]:
+            - navigation [ref=e93]:
+              - list [ref=e94]:
+                - link "Overview" [ref=e95] [cursor=pointer]:
+                  - /url: /stocks/HITI/options
+                - link "Contract Lookup" [ref=e96] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/contract-lookup
+                - link "Unusual Activity" [ref=e97] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/unusual-activity
+                - link "Hottest Contracts" [ref=e98] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/hottest-contracts
+                - link "Max Pain" [ref=e99] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/max-pain
+                - link "Greeks" [ref=e100] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/greeks
+                - link "Expected Move" [ref=e101] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/expected-move
+                - link "OI" [ref=e102] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/oi
+                - link "GEX" [ref=e103] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/gex/strike
+                - link "DEX" [ref=e104] [cursor=pointer]:
+                  - /url: /stocks/HITI/options/dex/strike
+            - generic [ref=e112]:
+              - generic [ref=e113]:
+                - heading "Option Contract Lookup" [level=2] [ref=e114]
+                - button "Copy link" [ref=e115] [cursor=pointer]
+              - generic [ref=e116]: Search for specific option contracts by expiration date, strike price and option type.
+              - link "The requested expiration date requires a Pro subscription. Showing the nearest available date. Upgrade →" [ref=e121] [cursor=pointer]:
+                - /url: /pricing
+                - generic [ref=e122]: The requested expiration date requires a Pro subscription. Showing the nearest available date.
+                - generic [ref=e126]: Upgrade →
+              - generic [ref=e129]:
+                - generic [ref=e130]:
+                  - generic [ref=e131]:
+                    - text: Date Expiration
+                    - generic [ref=e134] [cursor=pointer]
+                  - button "Aug 21, 2026" [ref=e137] [cursor=pointer]
+                - generic [ref=e141]:
+                  - generic [ref=e142]:
+                    - text: Strike Price
+                    - generic [ref=e145] [cursor=pointer]
+                  - button "2.5" [ref=e148] [cursor=pointer]
+                - generic [ref=e152]:
+                  - generic [ref=e153]:
+                    - text: Option Type
+                    - generic [ref=e156] [cursor=pointer]
+                  - button "Put" [ref=e159] [cursor=pointer]
+              - heading "HITI Aug 21, 2026 2.5 Put" [level=3] [ref=e160]
+              - heading "HITI260821P00002500" [level=3] [ref=e161]
+    - contentinfo [ref=e165]:
+      - generic [ref=e166]:
+        - generic [ref=e167]:
+          - generic [ref=e168]:
+            - img "logo" [ref=e169]
+            - generic [ref=e170]:
+              - text: Stocknear
+              - paragraph [ref=e171]: All-in-one Stock Analysis Platform to research your trading ideas.
+          - generic [ref=e172]:
+            - navigation [ref=e173]:
+              - paragraph [ref=e174]: Sections
+              - list [ref=e175]:
+                - listitem [ref=e176]:
+                  - link "Stocks" [ref=e177] [cursor=pointer]:
+                    - /url: /stocks/
+                - listitem [ref=e178]:
+                  - link "IPOs" [ref=e179] [cursor=pointer]:
+                    - /url: /ipos/
+                - listitem [ref=e180]:
+                  - link "ETFs" [ref=e181] [cursor=pointer]:
+                    - /url: /etf/
+                - listitem [ref=e182]:
+                  - link "Portfolio" [ref=e183] [cursor=pointer]:
+                    - /url: /portfolio/
+                - listitem [ref=e184]:
+                  - link "Learning Center" [ref=e185] [cursor=pointer]:
+                    - /url: /learning-center/
+            - navigation [ref=e186]:
+              - paragraph [ref=e187]: Services
+              - list [ref=e188]:
+                - listitem [ref=e189]:
+                  - link "Pricing Plan" [ref=e190] [cursor=pointer]:
+                    - /url: /pricing/
+                - listitem [ref=e191]:
+                  - link "Get Support" [ref=e192] [cursor=pointer]:
+                    - /url: /support/
+                - listitem [ref=e193]:
+                  - link "Install MCP Server" [ref=e194] [cursor=pointer]:
+                    - /url: /mcp
+                - listitem [ref=e195]:
+                  - link "Install the App" [ref=e196] [cursor=pointer]:
+                    - /url: /app/
+            - navigation [ref=e197]:
+              - paragraph [ref=e198]: Website
+              - list [ref=e199]:
+                - listitem [ref=e200]:
+                  - link "Login" [ref=e201] [cursor=pointer]:
+                    - /url: /login/
+                - listitem [ref=e202]:
+                  - link "FAQ" [ref=e203] [cursor=pointer]:
+                    - /url: /faq/
+                - listitem [ref=e204]:
+                  - link "Sitemap" [ref=e205] [cursor=pointer]:
+                    - /url: /sitemap/
+                - listitem [ref=e206]:
+                  - generic [ref=e207]:
+                    - button "Set light theme" [ref=e208] [cursor=pointer]: Light
+                    - button "Set dark theme" [pressed] [ref=e215] [cursor=pointer]: Dark
+                    - generic [ref=e218]: Toggle theme
+                - listitem [ref=e219]:
+                  - group [ref=e220]:
+                    - generic "Switch language en" [ref=e221] [cursor=pointer]:
+                      - generic [ref=e222]: Switch language
+                      - generic [ref=e223]: 🇺🇸
+                      - generic [ref=e224]: en
+            - navigation [ref=e227]:
+              - paragraph [ref=e228]: Company
+              - list [ref=e229]:
+                - listitem [ref=e230]:
+                  - link "About" [ref=e231] [cursor=pointer]:
+                    - /url: /about/
+                - listitem [ref=e232]:
+                  - link "Contact Us" [ref=e233] [cursor=pointer]:
+                    - /url: /contact/
+                - listitem [ref=e234]:
+                  - link "Terms of Use" [ref=e235] [cursor=pointer]:
+                    - /url: /terms-of-use/
+                - listitem [ref=e236]:
+                  - link "Privacy Policy" [ref=e237] [cursor=pointer]:
+                    - /url: /privacy-policy/
+                - listitem [ref=e238]:
+                  - link "Data Disclaimer" [ref=e239] [cursor=pointer]:
+                    - /url: /data-disclaimer/
+                - listitem [ref=e240]:
+                  - link "Imprint" [ref=e241] [cursor=pointer]:
+                    - /url: /imprint/
+        - generic [ref=e242]:
+          - generic [ref=e243]:
+            - link "Join us on Reddit" [ref=e244] [cursor=pointer]:
+              - /url: https://www.youtube.com/@stocknear
+              - img:
+                - generic "Youtube-color"
+            - link "Join us on Reddit" [ref=e245] [cursor=pointer]:
+              - /url: https://www.reddit.com/r/stocknear/
+            - link "Join us on Discord" [ref=e246] [cursor=pointer]:
+              - /url: https://discord.gg/hCwZMMZ2MT
+            - link "Follow on X" [ref=e247] [cursor=pointer]:
+              - /url: https://twitter.com/intent/follow?screen_name=stocknear
+          - generic [ref=e248]: © 2026 Stocknear. All rights reserved.
+  - navigation "Primary navigation" [ref=e249]:
+    - generic [ref=e250]:
+      - link "Home" [ref=e251] [cursor=pointer]:
+        - /url: /
+      - link "Portfolio" [ref=e257] [cursor=pointer]:
+        - /url: /portfolio
+      - link "Watchlist" [ref=e263] [cursor=pointer]:
+        - /url: /watchlist/stocks
+      - link "Alert" [ref=e268] [cursor=pointer]:
+        - /url: /alerts
+      - link "Chat" [ref=e276] [cursor=pointer]:
+        - /url: /chat

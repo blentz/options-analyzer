@@ -408,10 +408,69 @@ async def _get_or_create_status(db: AsyncSession, contract_id: int) -> ContractH
     return status
 
 
-async def sync_open_positions(
-    db: AsyncSession, force: bool = False, downloader=None
+@dataclass(frozen=True)
+class ContractRef:
+    """A contract named by its parts rather than by database identity.
+
+    The speculation page builds strategies from contracts the user may not
+    hold, so they have no option_contracts row to reference yet.
+    """
+
+    symbol: str
+    expiration: date
+    strike: Decimal
+    option_type: str  # "CALL" or "PUT"
+
+
+async def _get_or_create_contract(db: AsyncSession, ref: ContractRef) -> OptionContract:
+    """Resolve a ContractRef to an OptionContract row, creating it if absent.
+
+    Creating a row here widens what option_contracts means: from "contracts
+    you have traded" to "contracts you have traded or researched". That is
+    deliberate and safe — update_position() returns early for a contract
+    with no trades, and get_positions() joins OptionPosition, so a
+    researched contract never surfaces as a phantom position.
+    """
+    stmt = select(OptionContract).where(
+        OptionContract.symbol == ref.symbol.upper(),
+        OptionContract.expiration == ref.expiration,
+        OptionContract.strike == ref.strike,
+        OptionContract.option_type == ref.option_type.upper(),
+    )
+    existing = (await db.execute(stmt)).scalars().first()
+    if existing is not None:
+        return existing
+
+    created = OptionContract(
+        symbol=ref.symbol.upper(),
+        expiration=ref.expiration,
+        strike=ref.strike,
+        option_type=ref.option_type.upper(),
+    )
+    db.add(created)
+    await db.flush()
+    # Log the parts, not occ_symbol(created) — that validates and raises for
+    # a symbol shape it cannot build, which would abort the whole sync from
+    # inside a log statement, outside the per-contract error isolation below.
+    logger.info(
+        "Created contract row for researched contract %s %s %s %s",
+        created.symbol, created.expiration, created.strike, created.option_type,
+    )
+    return created
+
+
+async def sync_contract_history(
+    db: AsyncSession,
+    force: bool = False,
+    downloader=None,
+    extra: Optional[list[ContractRef]] = None,
 ) -> SyncSummary:
-    """Download and store history for every contract with an open position.
+    """Download and store history for open positions, plus any named contracts.
+
+    extra: contracts named by parts rather than by id — typically the legs
+        currently loaded in the speculation strategy builder. Rows are
+        created for any that do not exist yet. Contracts that are both held
+        and named appear once, not twice.
 
     downloader: optional callable (symbol, occ_symbol, dest_dir) -> Path,
         used per contract instead of a real browser session. Tests inject
@@ -422,7 +481,17 @@ async def sync_open_positions(
         .join(OptionPosition, OptionPosition.contract_id == OptionContract.id)
         .where(OptionPosition.is_closed == False)  # noqa: E712
     )
-    contracts = (await db.execute(stmt)).scalars().all()
+    contracts = list((await db.execute(stmt)).scalars().all())
+
+    if extra:
+        # Deduplicate by id: a leg the user also holds must be synced once.
+        seen = {c.id for c in contracts}
+        for ref in extra:
+            resolved = await _get_or_create_contract(db, ref)
+            if resolved.id not in seen:
+                seen.add(resolved.id)
+                contracts.append(resolved)
+        await db.commit()
 
     summary = SyncSummary(contracts_total=len(contracts))
     if not contracts:

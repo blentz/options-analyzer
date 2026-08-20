@@ -76,6 +76,16 @@
         debounceTimers: new Map(),
     };
 
+    // Build a coloured text node via textContent, never innerHTML. Sync
+    // error strings embed the URL the remote site redirected us to, so they
+    // cross a trust boundary and must never be interpreted as markup.
+    function coloredSpan(text, color) {
+        const span = document.createElement('span');
+        span.style.color = color;
+        span.textContent = text;
+        return span;
+    }
+
     function debounce(fn, key, delay = CONSTANTS.DEBOUNCE_MS) {
         if (state.debounceTimers.has(key)) clearTimeout(state.debounceTimers.get(key));
         state.debounceTimers.set(key, setTimeout(fn, delay));
@@ -375,6 +385,61 @@
                 }
             });
             return legs;
+        },
+
+        async syncHistory() {
+            // Sync price history for the contracts currently in the builder,
+            // plus any open positions. The legs are the point: those are the
+            // contracts being researched, which the positions-only sync never
+            // covered. collectLegs() already filters out incomplete rows.
+            if (!state.symbolData) { alert('Please lookup a symbol first'); return; }
+            const legs = this.collectLegs().map(l => ({
+                option_type: l.option_type, strike: l.strike, expiration: l.expiration,
+            }));
+            if (legs.length === 0) { alert('Please add at least one leg with a strike and expiration'); return; }
+
+            const btn = document.getElementById('sync-history-btn');
+            const out = document.getElementById('sync-history-status');
+            btn.disabled = true;
+            // textContent throughout — error strings embed the URL the remote
+            // site redirected to, so they are not ours to trust as markup.
+            out.replaceChildren(coloredSpan(
+                `Syncing ${legs.length} contract${legs.length === 1 ? '' : 's'} plus open positions — this can take a minute…`,
+                '#888'));
+            try {
+                const res = await fetch('/api/contract-history/sync', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: state.symbolData.symbol, legs}),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({detail: res.statusText}));
+                    out.replaceChildren(coloredSpan(err.detail || 'Sync failed', '#ef4444'));
+                    return;
+                }
+                const data = await res.json();
+                const nodes = [document.createTextNode(
+                    `${data.synced} synced, ${data.skipped} skipped, ` +
+                    `${data.failed} failed, ${data.rows_upserted} rows`)];
+                if (data.errors && data.errors.length) {
+                    const ul = document.createElement('ul');
+                    ul.style.cssText = 'margin:0.5rem 0 0 1rem; color:#ef4444;';
+                    data.errors.forEach(e => {
+                        const li = document.createElement('li');
+                        const strong = document.createElement('strong');
+                        strong.textContent = e.contract;
+                        li.appendChild(strong);
+                        li.append(': ' + e.error);
+                        ul.appendChild(li);
+                    });
+                    nodes.push(ul);
+                }
+                out.replaceChildren(...nodes);
+            } catch (e) {
+                out.replaceChildren(coloredSpan('Sync failed: ' + e.message, '#ef4444'));
+            } finally {
+                btn.disabled = false;
+            }
         },
 
         async analyzeStrategy() {

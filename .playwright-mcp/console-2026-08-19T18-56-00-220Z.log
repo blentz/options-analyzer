@@ -1,0 +1,4 @@
+[     578ms] [LOG] WebSocket connection opened @ https://www.stocknear.com/_app/immutable/nodes/41.DsIg8br2.js:1
+[    2408ms] [LOG] [SW] Service worker already registered @ https://www.stocknear.com/_app/immutable/chunks/XNf7Jvj-.js:13
+[ 1446445ms] [LOG] WebSocket connection closed:  @ https://www.stocknear.com/_app/immutable/nodes/41.DsIg8br2.js:1
+[ 1447757ms] [LOG] WebSocket connection opened @ https://www.stocknear.com/_app/immutable/nodes/41.DsIg8br2.js:1

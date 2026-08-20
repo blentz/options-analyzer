@@ -521,20 +521,71 @@ async def rebuild_cycles(db: AsyncSession = Depends(get_db)):
     return {"rebuilt": counts, "total_cycles": sum(counts.values())}
 
 
+class ContractHistorySyncLeg(BaseModel):
+    """One contract to sync, named by its parts.
+
+    A subset of SpeculationLegInput — history needs only enough to build an
+    OCC symbol, so action, quantity and premium are irrelevant here.
+    """
+    option_type: str  # "CALL" or "PUT"
+    strike: float
+    expiration: str   # "YYYY-MM-DD"
+
+
+class ContractHistorySyncRequest(BaseModel):
+    """Optional body for /api/contract-history/sync.
+
+    Omitted entirely, the sync covers open positions only.
+    """
+    symbol: str
+    legs: list[ContractHistorySyncLeg] = []
+
+
 @app.post("/api/contract-history/sync")
-async def sync_contract_history(force: bool = False, db: AsyncSession = Depends(get_db)):
-    """Download and store price history for every open position.
+async def sync_contract_history(
+    force: bool = False,
+    body: Optional[ContractHistorySyncRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download and store price history for open positions, plus named legs.
 
     User-triggered and blocking, matching /api/positions/heal and
     /api/cycles/rebuild. One browser session covers the whole batch, so
     cost is roughly 15s of launch plus 2-4s per contract.
 
+    With no body this syncs open positions only, which is what the
+    positions page has always done. The speculation page posts the legs
+    currently in its strategy builder, so a contract being researched but
+    not held gets history too — an option_contracts row is created for it
+    on demand.
+
     Idempotent: each download is a complete history, so re-running
     converges rather than duplicating.
     """
-    from app.services.contract_history import sync_open_positions
+    from datetime import datetime as _datetime
+    from decimal import Decimal as _Decimal, InvalidOperation as _InvalidOperation
 
-    summary = await sync_open_positions(db, force=force)
+    from app.services.contract_history import ContractRef, sync_contract_history as _sync
+
+    extra: list[ContractRef] = []
+    if body is not None and body.legs:
+        for leg in body.legs:
+            try:
+                extra.append(ContractRef(
+                    symbol=body.symbol,
+                    expiration=_datetime.strptime(leg.expiration, "%Y-%m-%d").date(),
+                    strike=_Decimal(str(leg.strike)),
+                    option_type=leg.option_type,
+                ))
+            except (ValueError, _InvalidOperation) as e:
+                # A malformed leg is the caller's problem, not a sync failure —
+                # reject the request rather than silently syncing a subset.
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unusable leg {leg.option_type} {leg.strike} {leg.expiration}: {e}",
+                )
+
+    summary = await _sync(db, force=force, extra=extra or None)
     return {
         "contracts_total": summary.contracts_total,
         "synced": summary.synced,

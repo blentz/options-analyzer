@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.models import (
     Base, ContractHistory, ContractHistorySync, OptionContract, OptionPosition,
 )
-from app.services.contract_history import occ_symbol, sync_open_positions
+from app.services.contract_history import occ_symbol, sync_contract_history
 from app.stocknear_models import ProGatedError
 
 FIXTURE = Path(__file__).parent / "fixtures" / "contract_history" / "HITI261016P00002500.csv"
@@ -64,7 +64,7 @@ async def test_syncs_open_position(db):
     await _open_position(db)
     await db.commit()
 
-    summary = await sync_open_positions(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, downloader=_fixture_downloader)
 
     assert summary.contracts_total == 1
     assert summary.synced == 1
@@ -82,7 +82,7 @@ async def test_skips_closed_positions(db):
     pos.is_closed = True
     await db.commit()
 
-    summary = await sync_open_positions(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, downloader=_fixture_downloader)
     assert summary.contracts_total == 0
     assert summary.synced == 0
 
@@ -92,7 +92,7 @@ async def test_records_success_status(db):
     c = await _open_position(db)
     await db.commit()
 
-    await sync_open_positions(db, downloader=_fixture_downloader)
+    await sync_contract_history(db, downloader=_fixture_downloader)
 
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
     assert status.last_success_at is not None
@@ -105,7 +105,7 @@ async def test_records_failure_without_raising(db):
     await _open_position(db)
     await db.commit()
 
-    summary = await sync_open_positions(db, downloader=_failing_downloader)
+    summary = await sync_contract_history(db, downloader=_failing_downloader)
 
     assert summary.failed == 1
     assert summary.synced == 0
@@ -131,7 +131,7 @@ async def test_download_failure_with_no_message_keeps_exception_type(db):
     def empty_message_downloader(symbol, occ_symbol, dest_dir):
         raise ProGatedError()
 
-    summary = await sync_open_positions(db, downloader=empty_message_downloader)
+    summary = await sync_contract_history(db, downloader=empty_message_downloader)
 
     assert summary.failed == 1
     assert summary.errors[0].error == "ProGatedError: "
@@ -151,7 +151,7 @@ async def test_one_failure_does_not_abort_batch(db):
             raise ProGatedError("gated")
         return FIXTURE
 
-    summary = await sync_open_positions(db, downloader=mixed)
+    summary = await sync_contract_history(db, downloader=mixed)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -176,7 +176,7 @@ async def test_unparseable_download_is_recorded_and_retained(db):
         junk.write_text("this is not a contract history csv\n")
         return junk
 
-    summary = await sync_open_positions(db, downloader=bad_downloader)
+    summary = await sync_contract_history(db, downloader=bad_downloader)
 
     assert summary.failed == 1
     assert summary.synced == 0
@@ -214,7 +214,7 @@ async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, t
     bad = await _open_position(db, symbol="BBB", strike="2.00", exp=date(2026, 10, 16))
     await db.commit()
 
-    # A rollback inside sync_open_positions expires every object this
+    # A rollback inside sync_contract_history expires every object this
     # session tracks -- including `good` and `bad` -- so anything needed
     # after the call must be captured as a plain value now, not read off
     # the ORM objects later (that would raise MissingGreenlet under the
@@ -239,7 +239,7 @@ async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, t
     def mixed(symbol, occ, dest_dir):
         return dup_csv if symbol == "BBB" else FIXTURE
 
-    summary = await sync_open_positions(db, downloader=mixed)
+    summary = await sync_contract_history(db, downloader=mixed)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -292,7 +292,7 @@ async def test_invalid_symbol_is_isolated_and_does_not_abort_batch(db):
     bad = await _open_position(db, symbol="BRK.B", strike="2.00", exp=date(2026, 10, 16))
     await db.commit()
 
-    # A rollback anywhere in sync_open_positions expires every object this
+    # A rollback anywhere in sync_contract_history expires every object this
     # session tracks, so anything needed after the call must be captured
     # as a plain value now (see the identical note on the "duplicate
     # date" test above).
@@ -305,7 +305,7 @@ async def test_invalid_symbol_is_isolated_and_does_not_abort_batch(db):
         assert symbol == "AAA"
         return FIXTURE
 
-    summary = await sync_open_positions(db, downloader=only_good)
+    summary = await sync_contract_history(db, downloader=only_good)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -354,7 +354,7 @@ async def test_ttl_skips_recent_sync(db):
     ))
     await db.commit()
 
-    summary = await sync_open_positions(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, downloader=_fixture_downloader)
     assert summary.skipped == 1
     assert summary.synced == 0
 
@@ -369,7 +369,7 @@ async def test_force_overrides_ttl(db):
     ))
     await db.commit()
 
-    summary = await sync_open_positions(db, force=True, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, force=True, downloader=_fixture_downloader)
     assert summary.skipped == 0
     assert summary.synced == 1
 
@@ -384,6 +384,6 @@ async def test_stale_sync_is_refreshed(db):
     ))
     await db.commit()
 
-    summary = await sync_open_positions(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, downloader=_fixture_downloader)
     assert summary.skipped == 0
     assert summary.synced == 1

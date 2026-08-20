@@ -1,0 +1,950 @@
+- generic [ref=f18e1]:
+  - generic [ref=f18e2]:
+    - generic [ref=f18e5]:
+      - generic [ref=f18e6]:
+        - button "Toggle Menu" [ref=f18e7] [cursor=pointer]
+        - link "Stocknear Logo Stocknear" [ref=f18e10] [cursor=pointer]:
+          - /url: /
+          - img "Stocknear Logo" [ref=f18e11]
+          - generic [ref=f18e12]: Stocknear
+        - generic [ref=f18e13]:
+          - generic [ref=f18e18]:
+            - combobox "Company or stock symbol..." [ref=f18e22]
+            - generic [ref=f18e23]:
+              - generic:
+                - generic: ctrl
+                - generic: K
+          - link [ref=f18e24] [cursor=pointer]:
+            - /url: /notifications
+          - button "My Account" [ref=f18e29] [cursor=pointer]
+      - main [ref=f18e35]:
+        - main [ref=f18e38]:
+          - generic [ref=f18e45]:
+            - generic [ref=f18e46]:
+              - generic [ref=f18e49]:
+                - button "Watchlist" [ref=f18e50] [cursor=pointer]
+                - checkbox
+                - generic "Alert" [ref=f18e53] [cursor=pointer]
+                - link "Pro Chart" [ref=f18e59] [cursor=pointer]:
+                  - /url: /chart/HITI
+                - button "Export Price" [ref=f18e63] [cursor=pointer]
+                - checkbox "Close modal"
+                - option "1 Hour"
+                - option "30 Min"
+                - option "15 Min" [selected]
+                - option "5 Min"
+                - option "1 Min"
+              - generic [ref=f18e69]:
+                - generic [ref=f18e71]:
+                  - heading "High Tide Inc. (HITI)" [level=1] [ref=f18e72]:
+                    - text: High Tide Inc.
+                    - generic [ref=f18e73]: (HITI)
+                  - generic [ref=f18e74]: "NASDAQ: HITI · Real-Time Price · USD"
+                - generic [ref=f18e76]:
+                  - generic [ref=f18e77]: "2.46"
+                  - generic [ref=f18e78]: +0.06 (2.50%)
+                  - generic [ref=f18e79]: Aug 19, 2026, 2:49 PM - Market open
+            - navigation [ref=f18e80]:
+              - list [ref=f18e81]:
+                - link "Overview" [ref=f18e82] [cursor=pointer]:
+                  - /url: /stocks/HITI
+                - link "Financials" [ref=f18e83] [cursor=pointer]:
+                  - /url: /stocks/HITI/financials
+                - link "Statistics" [ref=f18e84] [cursor=pointer]:
+                  - /url: /stocks/HITI/statistics
+                - link "Metrics" [ref=f18e85] [cursor=pointer]:
+                  - /url: /stocks/HITI/metrics
+                - link "Forecast" [ref=f18e86] [cursor=pointer]:
+                  - /url: /stocks/HITI/forecast
+                - link "Unusual Orders" [ref=f18e87] [cursor=pointer]:
+                  - /url: /stocks/HITI/unusual-orders
+                - link "Options" [ref=f18e88] [cursor=pointer]:
+                  - /url: /stocks/HITI/options
+                - link "Insider" [ref=f18e89] [cursor=pointer]:
+                  - /url: /stocks/HITI/insider
+                - link "History" [ref=f18e90] [cursor=pointer]:
+                  - /url: /stocks/HITI/history
+                - link "Profile" [ref=f18e91] [cursor=pointer]:
+                  - /url: /stocks/HITI/profile
+            - main [ref=f18e96]:
+              - navigation [ref=f18e97]:
+                - list [ref=f18e98]:
+                  - link "Overview" [ref=f18e99] [cursor=pointer]:
+                    - /url: /stocks/HITI/options
+                  - link "Contract Lookup" [ref=f18e100] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/contract-lookup
+                  - link "Unusual Activity" [ref=f18e101] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/unusual-activity
+                  - link "Hottest Contracts" [ref=f18e102] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/hottest-contracts
+                  - link "Max Pain" [ref=f18e103] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/max-pain
+                  - link "Greeks" [ref=f18e104] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/greeks
+                  - link "Expected Move" [ref=f18e105] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/expected-move
+                  - link "OI" [ref=f18e106] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/oi
+                  - link "GEX" [ref=f18e107] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/gex/strike
+                  - link "DEX" [ref=f18e108] [cursor=pointer]:
+                    - /url: /stocks/HITI/options/dex/strike
+              - generic [ref=f18e112]:
+                - generic [ref=f18e116]:
+                  - generic [ref=f18e117]:
+                    - heading "Option Contract Lookup" [level=2] [ref=f18e118]
+                    - button "Copy link" [ref=f18e277] [cursor=pointer]
+                  - generic [ref=f18e119]: Search for specific option contracts by expiration date, strike price and option type.
+                  - generic [ref=f18e126]:
+                    - generic [ref=f18e127]:
+                      - generic [ref=f18e128]:
+                        - text: Date Expiration
+                        - generic [ref=f18e131] [cursor=pointer]
+                      - button "Oct 16, 2026" [ref=f18e134] [cursor=pointer]
+                    - generic [ref=f18e138]:
+                      - generic [ref=f18e139]:
+                        - text: Strike Price
+                        - generic [ref=f18e142] [cursor=pointer]
+                      - button "2.5" [ref=f18e145] [cursor=pointer]
+                    - generic [ref=f18e149]:
+                      - generic [ref=f18e150]:
+                        - text: Option Type
+                        - generic [ref=f18e153] [cursor=pointer]
+                      - button "Put" [ref=f18e156] [cursor=pointer]
+                  - heading "HITI Oct 16, 2026 2.5 Put" [level=3] [ref=f18e157]
+                  - heading "HITI261016P00002500" [level=3] [ref=f18e278]
+                  - generic [ref=f18e279]:
+                    - table [ref=f18e280]:
+                      - rowgroup [ref=f18e281]:
+                        - row [ref=f18e282]:
+                          - cell "Last" [ref=f18e283]
+                          - cell "0.3" [ref=f18e284]
+                        - row [ref=f18e285]:
+                          - cell "Bid" [ref=f18e286]
+                          - cell "0.15" [ref=f18e287]
+                        - row [ref=f18e288]:
+                          - cell "Mid" [ref=f18e289]
+                          - cell "0.25" [ref=f18e290]
+                        - row [ref=f18e291]:
+                          - cell "Ask" [ref=f18e292]
+                          - cell "0.35" [ref=f18e293]
+                        - row [ref=f18e294]:
+                          - cell "Open" [ref=f18e295]
+                          - cell "0.3" [ref=f18e296]
+                        - row [ref=f18e297]:
+                          - cell "Volume" [ref=f18e298]
+                          - cell "1" [ref=f18e299]
+                        - row [ref=f18e300]:
+                          - cell "Open Interest" [ref=f18e301]
+                          - cell "3,784" [ref=f18e302]
+                        - row [ref=f18e303]:
+                          - cell "IV" [ref=f18e304]
+                          - cell "58.12%" [ref=f18e305]
+                    - table [ref=f18e306]:
+                      - rowgroup [ref=f18e307]:
+                        - row [ref=f18e308]:
+                          - cell "Delta" [ref=f18e309]
+                          - cell "-0.486" [ref=f18e310]
+                        - row [ref=f18e311]:
+                          - cell "Gamma" [ref=f18e312]
+                          - cell "0.705" [ref=f18e313]
+                        - row [ref=f18e314]:
+                          - cell "Theta" [ref=f18e315]
+                          - cell "-0.002" [ref=f18e316]
+                        - row [ref=f18e317]:
+                          - cell "Vega" [ref=f18e318]
+                          - cell "0.004" [ref=f18e319]
+                        - row [ref=f18e320]:
+                          - cell "Rho" [ref=f18e321]
+                          - cell "-0.002" [ref=f18e322]
+                        - row [ref=f18e323]:
+                          - cell "Charm" [ref=f18e324]
+                          - cell "-0.308" [ref=f18e325]
+                        - row [ref=f18e326]:
+                          - cell "Vanna" [ref=f18e327]
+                          - cell "0.134" [ref=f18e328]
+                        - row [ref=f18e329]:
+                          - cell "Vomma" [ref=f18e330]
+                          - cell "-0.005" [ref=f18e331]
+                  - generic [ref=f18e332]:
+                    - generic [ref=f18e333]:
+                      - heading "Contract Chart" [level=2] [ref=f18e334]
+                      - generic [ref=f18e336]:
+                        - button "Price" [ref=f18e338] [cursor=pointer]
+                        - button "3M" [ref=f18e343] [cursor=pointer]
+                    - generic [ref=f18e351]:
+                      - img "Contract History" [ref=f18e352]:
+                        - generic [ref=f18e370]:
+                          - generic [ref=f18e371]: Option Price
+                          - generic [ref=f18e374]: Stock Price
+                        - generic [ref=f18e377]:
+                          - generic [ref=f18e378]: May 18
+                          - generic [ref=f18e379]: Jun 5
+                          - generic [ref=f18e380]: Jun 24
+                          - generic [ref=f18e381]: Jul 13
+                          - generic [ref=f18e382]: Aug 1
+                          - generic [ref=f18e383]: Aug 19
+                        - generic [ref=f18e384]:
+                          - generic [ref=f18e385]: "0"
+                          - generic [ref=f18e386]: "0.2"
+                          - generic [ref=f18e387]: "0.4"
+                          - generic [ref=f18e388]: "0.6"
+                      - heading "Contract History" [level=3] [ref=f18e390]
+                  - generic [ref=f18e392]:
+                    - heading "History" [level=2] [ref=f18e393]
+                    - button "Download" [expanded] [ref=f18e397] [cursor=pointer]
+                  - table [ref=f18e403]:
+                    - rowgroup [ref=f18e404]:
+                      - row [ref=f18e405]:
+                        - columnheader "Date" [ref=f18e406] [cursor=pointer]
+                        - columnheader "Vol" [ref=f18e408] [cursor=pointer]
+                        - columnheader "OI" [ref=f18e410] [cursor=pointer]
+                        - columnheader "OI Change" [ref=f18e412] [cursor=pointer]
+                        - columnheader "% Change OI" [ref=f18e414] [cursor=pointer]
+                        - columnheader "Last Price" [ref=f18e416] [cursor=pointer]
+                        - columnheader "Avg Price" [ref=f18e418] [cursor=pointer]
+                        - columnheader "IV" [ref=f18e420] [cursor=pointer]
+                        - columnheader "Total Prem" [ref=f18e422] [cursor=pointer]
+                        - columnheader "GEX" [ref=f18e424] [cursor=pointer]
+                        - columnheader "DEX" [ref=f18e426] [cursor=pointer]
+                    - rowgroup [ref=f18e428]:
+                      - row [ref=f18e429]:
+                        - cell "Aug 19, 2026" [ref=f18e430]
+                        - cell "1" [ref=f18e431]
+                        - cell "3,784" [ref=f18e432]
+                        - cell "0" [ref=f18e433]
+                        - cell "0%" [ref=f18e434]
+                        - cell "0.3" [ref=f18e435]
+                        - cell "0.25" [ref=f18e436]
+                        - cell "58.12%" [ref=f18e437]
+                        - cell "25" [ref=f18e438]
+                        - cell "266.81K" [ref=f18e439]
+                        - cell "-183.75K" [ref=f18e440]
+                      - row [ref=f18e441]:
+                        - cell "Aug 17, 2026" [ref=f18e442]
+                        - cell "0" [ref=f18e443]
+                        - cell "3,784" [ref=f18e444]
+                        - cell "-2" [ref=f18e445]
+                        - cell "-0.05%" [ref=f18e446]
+                        - cell "0" [ref=f18e447]
+                        - cell "0.35" [ref=f18e448]
+                        - cell "68.12%" [ref=f18e449]
+                        - cell "0" [ref=f18e450]
+                        - cell "233.51K" [ref=f18e451]
+                        - cell "-203.55K" [ref=f18e452]
+                      - row [ref=f18e453]:
+                        - cell "Aug 14, 2026" [ref=f18e454]
+                        - cell "2" [ref=f18e455]
+                        - cell "3,786" [ref=f18e456]
+                        - cell "0" [ref=f18e457]
+                        - cell "0%" [ref=f18e458]
+                        - cell "0.4" [ref=f18e459]
+                        - cell "0.35" [ref=f18e460]
+                        - cell "69.37%" [ref=f18e461]
+                        - cell "70" [ref=f18e462]
+                        - cell "222.73K" [ref=f18e463]
+                        - cell "-196.68K" [ref=f18e464]
+                      - row [ref=f18e465]:
+                        - cell "Aug 13, 2026" [ref=f18e466]
+                        - cell "0" [ref=f18e467]
+                        - cell "3,786" [ref=f18e468]
+                        - cell "-5" [ref=f18e469]
+                        - cell "-0.13%" [ref=f18e470]
+                        - cell "0" [ref=f18e471]
+                        - cell "0.35" [ref=f18e472]
+                        - cell "65.00%" [ref=f18e473]
+                        - cell "0" [ref=f18e474]
+                        - cell "237.61K" [ref=f18e475]
+                        - cell "-206.65K" [ref=f18e476]
+                      - row [ref=f18e477]:
+                        - cell "Aug 12, 2026" [ref=f18e478]
+                        - cell "10" [ref=f18e479]
+                        - cell "3,791" [ref=f18e480]
+                        - cell "+25" [ref=f18e481]
+                        - cell "+0.66%" [ref=f18e482]
+                        - cell "0.35" [ref=f18e483]
+                        - cell "0.4" [ref=f18e484]
+                        - cell "78.59%" [ref=f18e485]
+                        - cell "400" [ref=f18e486]
+                        - cell "195.63K" [ref=f18e487]
+                        - cell "-193.63K" [ref=f18e488]
+                      - row [ref=f18e489]:
+                        - cell "Aug 11, 2026" [ref=f18e490]
+                        - cell "25" [ref=f18e491]
+                        - cell "3,766" [ref=f18e492]
+                        - cell "0" [ref=f18e493]
+                        - cell "0%" [ref=f18e494]
+                        - cell "0.35" [ref=f18e495]
+                        - cell "0.4" [ref=f18e496]
+                        - cell "79.53%" [ref=f18e497]
+                        - cell "1K" [ref=f18e498]
+                        - cell "189.84K" [ref=f18e499]
+                        - cell "-189.35K" [ref=f18e500]
+                      - row [ref=f18e501]:
+                        - cell "Aug 10, 2026" [ref=f18e502]
+                        - cell "0" [ref=f18e503]
+                        - cell "3,766" [ref=f18e504]
+                        - cell "0" [ref=f18e505]
+                        - cell "0%" [ref=f18e506]
+                        - cell "0" [ref=f18e507]
+                        - cell "0.525" [ref=f18e508]
+                        - cell "104.38%" [ref=f18e509]
+                        - cell "0" [ref=f18e510]
+                        - cell "145.88K" [ref=f18e511]
+                        - cell "-180.48K" [ref=f18e512]
+                      - row [ref=f18e513]:
+                        - cell "Aug 07, 2026" [ref=f18e514]
+                        - cell "0" [ref=f18e515]
+                        - cell "3,766" [ref=f18e516]
+                        - cell "0" [ref=f18e517]
+                        - cell "0%" [ref=f18e518]
+                        - cell "0" [ref=f18e519]
+                        - cell "0.4" [ref=f18e520]
+                        - cell "72.03%" [ref=f18e521]
+                        - cell "0" [ref=f18e522]
+                        - cell "206.34K" [ref=f18e523]
+                        - cell "-200.98K" [ref=f18e524]
+                      - row [ref=f18e525]:
+                        - cell "Aug 06, 2026" [ref=f18e526]
+                        - cell "0" [ref=f18e527]
+                        - cell "3,766" [ref=f18e528]
+                        - cell "0" [ref=f18e529]
+                        - cell "0%" [ref=f18e530]
+                        - cell "0" [ref=f18e531]
+                        - cell "0.375" [ref=f18e532]
+                        - cell "62.81%" [ref=f18e533]
+                        - cell "0" [ref=f18e534]
+                        - cell "234.08K" [ref=f18e535]
+                        - cell "-211.14K" [ref=f18e536]
+                      - row [ref=f18e537]:
+                        - cell "Aug 05, 2026" [ref=f18e538]
+                        - cell "0" [ref=f18e539]
+                        - cell "3,766" [ref=f18e540]
+                        - cell "0" [ref=f18e541]
+                        - cell "0%" [ref=f18e542]
+                        - cell "0" [ref=f18e543]
+                        - cell "0.5" [ref=f18e544]
+                        - cell "92.19%" [ref=f18e545]
+                        - cell "0" [ref=f18e546]
+                        - cell "161.63K" [ref=f18e547]
+                        - cell "-190.32K" [ref=f18e548]
+                      - row [ref=f18e549]:
+                        - cell "Aug 04, 2026" [ref=f18e550]
+                        - cell "2" [ref=f18e551]
+                        - cell "3,766" [ref=f18e552]
+                        - cell "+10" [ref=f18e553]
+                        - cell "+0.27%" [ref=f18e554]
+                        - cell "0.1" [ref=f18e555]
+                        - cell "0.375" [ref=f18e556]
+                        - cell "56.25%" [ref=f18e557]
+                        - cell "75" [ref=f18e558]
+                        - cell "256.35K" [ref=f18e559]
+                        - cell "-227.5K" [ref=f18e560]
+                      - row [ref=f18e561]:
+                        - cell "Aug 03, 2026" [ref=f18e562]
+                        - cell "10" [ref=f18e563]
+                        - cell "3,756" [ref=f18e564]
+                        - cell "0" [ref=f18e565]
+                        - cell "0%" [ref=f18e566]
+                        - cell "0.52" [ref=f18e567]
+                        - cell "0.45" [ref=f18e568]
+                        - cell "60.62%" [ref=f18e569]
+                        - cell "450" [ref=f18e570]
+                        - cell "236.71K" [ref=f18e571]
+                        - cell "-244.65K" [ref=f18e572]
+                      - row [ref=f18e573]:
+                        - cell "Jul 31, 2026" [ref=f18e574]
+                        - cell "0" [ref=f18e575]
+                        - cell "3,756" [ref=f18e576]
+                        - cell "0" [ref=f18e577]
+                        - cell "0%" [ref=f18e578]
+                        - cell "0" [ref=f18e579]
+                        - cell "0.6" [ref=f18e580]
+                        - cell "94.06%" [ref=f18e581]
+                        - cell "0" [ref=f18e582]
+                        - cell "161.82K" [ref=f18e583]
+                        - cell "-209.87K" [ref=f18e584]
+                      - row [ref=f18e585]:
+                        - cell "Jul 30, 2026" [ref=f18e586]
+                        - cell "0" [ref=f18e587]
+                        - cell "3,756" [ref=f18e588]
+                        - cell "0" [ref=f18e589]
+                        - cell "0%" [ref=f18e590]
+                        - cell "0" [ref=f18e591]
+                        - cell "0.575" [ref=f18e592]
+                        - cell "88.91%" [ref=f18e593]
+                        - cell "0" [ref=f18e594]
+                        - cell "168.36K" [ref=f18e595]
+                        - cell "-210.77K" [ref=f18e596]
+                      - row [ref=f18e597]:
+                        - cell "Jul 29, 2026" [ref=f18e598]
+                        - cell "60" [ref=f18e599]
+                        - cell "3,756" [ref=f18e600]
+                        - cell "+127" [ref=f18e601]
+                        - cell "+3.5%" [ref=f18e602]
+                        - cell "0.57" [ref=f18e603]
+                        - cell "0.65" [ref=f18e604]
+                        - cell "95.94%" [ref=f18e605]
+                        - cell "3.9K" [ref=f18e606]
+                        - cell "160.4K" [ref=f18e607]
+                        - cell "-218.13K" [ref=f18e608]
+                      - row [ref=f18e609]:
+                        - cell "Jul 28, 2026" [ref=f18e610]
+                        - cell "473" [ref=f18e611]
+                        - cell "3,629" [ref=f18e612]
+                        - cell "0" [ref=f18e613]
+                        - cell "0%" [ref=f18e614]
+                        - cell "0.55" [ref=f18e615]
+                        - cell "0.625" [ref=f18e616]
+                        - cell "88.91%" [ref=f18e617]
+                        - cell "29.56K" [ref=f18e618]
+                        - cell "164.14K" [ref=f18e619]
+                        - cell "-215.55K" [ref=f18e620]
+                      - row [ref=f18e621]:
+                        - cell "Jul 27, 2026" [ref=f18e622]
+                        - cell "0" [ref=f18e623]
+                        - cell "3,629" [ref=f18e624]
+                        - cell "0" [ref=f18e625]
+                        - cell "0%" [ref=f18e626]
+                        - cell "0" [ref=f18e627]
+                        - cell "0.45" [ref=f18e628]
+                        - cell "54.37%" [ref=f18e629]
+                        - cell "0" [ref=f18e630]
+                        - cell "238.08K" [ref=f18e631]
+                        - cell "-246.51K" [ref=f18e632]
+                      - row [ref=f18e633]:
+                        - cell "Jul 24, 2026" [ref=f18e634]
+                        - cell "0" [ref=f18e635]
+                        - cell "3,629" [ref=f18e636]
+                        - cell "-80" [ref=f18e637]
+                        - cell "-2.16%" [ref=f18e638]
+                        - cell "0" [ref=f18e639]
+                        - cell "0.475" [ref=f18e640]
+                        - cell "62.50%" [ref=f18e641]
+                        - cell "0" [ref=f18e642]
+                        - cell "213.02K" [ref=f18e643]
+                        - cell "-227.71K" [ref=f18e644]
+                      - row [ref=f18e645]:
+                        - cell "Jul 23, 2026" [ref=f18e646]
+                        - cell "140" [ref=f18e647]
+                        - cell "3,709" [ref=f18e648]
+                        - cell "0" [ref=f18e649]
+                        - cell "0%" [ref=f18e650]
+                        - cell "0.45" [ref=f18e651]
+                        - cell "0.5" [ref=f18e652]
+                        - cell "69.37%" [ref=f18e653]
+                        - cell "7K" [ref=f18e654]
+                        - cell "198.82K" [ref=f18e655]
+                        - cell "-223.24K" [ref=f18e656]
+                      - row [ref=f18e657]:
+                        - cell "Jul 22, 2026" [ref=f18e658]
+                        - cell "0" [ref=f18e659]
+                        - cell "3,709" [ref=f18e660]
+                        - cell "-35" [ref=f18e661]
+                        - cell "-0.93%" [ref=f18e662]
+                        - cell "0" [ref=f18e663]
+                        - cell "0.45" [ref=f18e664]
+                        - cell "56.25%" [ref=f18e665]
+                        - cell "0" [ref=f18e666]
+                        - cell "234.05K" [ref=f18e667]
+                        - cell "-241.05K" [ref=f18e668]
+                      - row [ref=f18e669]:
+                        - cell "Jul 21, 2026" [ref=f18e670]
+                        - cell "35" [ref=f18e671]
+                        - cell "3,744" [ref=f18e672]
+                        - cell "0" [ref=f18e673]
+                        - cell "0%" [ref=f18e674]
+                        - cell "0.5" [ref=f18e675]
+                        - cell "0.425" [ref=f18e676]
+                        - cell "56.56%" [ref=f18e677]
+                        - cell "1.49K" [ref=f18e678]
+                        - cell "235.45K" [ref=f18e679]
+                        - cell "-230.49K" [ref=f18e680]
+                      - row [ref=f18e681]:
+                        - cell "Jul 20, 2026" [ref=f18e682]
+                        - cell "0" [ref=f18e683]
+                        - cell "3,744" [ref=f18e684]
+                        - cell "+10" [ref=f18e685]
+                        - cell "+0.27%" [ref=f18e686]
+                        - cell "0" [ref=f18e687]
+                        - cell "0.45" [ref=f18e688]
+                        - cell "57.50%" [ref=f18e689]
+                        - cell "0" [ref=f18e690]
+                        - cell "230.68K" [ref=f18e691]
+                        - cell "-237.88K" [ref=f18e692]
+                      - row [ref=f18e693]:
+                        - cell "Jul 17, 2026" [ref=f18e694]
+                        - cell "10" [ref=f18e695]
+                        - cell "3,734" [ref=f18e696]
+                        - cell "+415" [ref=f18e697]
+                        - cell "+12.5%" [ref=f18e698]
+                        - cell "0.5" [ref=f18e699]
+                        - cell "0.325" [ref=f18e700]
+                        - cell "37.50%" [ref=f18e701]
+                        - cell "325" [ref=f18e702]
+                        - cell "321.67K" [ref=f18e703]
+                        - cell "-250.87K" [ref=f18e704]
+                      - row [ref=f18e705]:
+                        - cell "Jul 16, 2026" [ref=f18e706]
+                        - cell "415" [ref=f18e707]
+                        - cell "3,319" [ref=f18e708]
+                        - cell "0" [ref=f18e709]
+                        - cell "0%" [ref=f18e710]
+                        - cell "0.51" [ref=f18e711]
+                        - cell "0.475" [ref=f18e712]
+                        - cell "56.87%" [ref=f18e713]
+                        - cell "19.71K" [ref=f18e714]
+                        - cell "202.06K" [ref=f18e715]
+                        - cell "-215.84K" [ref=f18e716]
+                      - row [ref=f18e717]:
+                        - cell "Jul 15, 2026" [ref=f18e718]
+                        - cell "0" [ref=f18e719]
+                        - cell "3,319" [ref=f18e720]
+                        - cell "0" [ref=f18e721]
+                        - cell "0%" [ref=f18e722]
+                        - cell "0" [ref=f18e723]
+                        - cell "0.45" [ref=f18e724]
+                        - cell "57.81%" [ref=f18e725]
+                        - cell "0" [ref=f18e726]
+                        - cell "199.44K" [ref=f18e727]
+                        - cell "-206.03K" [ref=f18e728]
+                      - row [ref=f18e729]:
+                        - cell "Jul 14, 2026" [ref=f18e730]
+                        - cell "0" [ref=f18e731]
+                        - cell "3,319" [ref=f18e732]
+                        - cell "+25" [ref=f18e733]
+                        - cell "+0.76%" [ref=f18e734]
+                        - cell "0" [ref=f18e735]
+                        - cell "0.475" [ref=f18e736]
+                        - cell "60.62%" [ref=f18e737]
+                        - cell "0" [ref=f18e738]
+                        - cell "190.99K" [ref=f18e739]
+                        - cell "-203.93K" [ref=f18e740]
+                      - row [ref=f18e741]:
+                        - cell "Jul 13, 2026" [ref=f18e742]
+                        - cell "25" [ref=f18e743]
+                        - cell "3,294" [ref=f18e744]
+                        - cell "+15" [ref=f18e745]
+                        - cell "+0.46%" [ref=f18e746]
+                        - cell "0.49" [ref=f18e747]
+                        - cell "0.45" [ref=f18e748]
+                        - cell "58.75%" [ref=f18e749]
+                        - cell "1.13K" [ref=f18e750]
+                        - cell "193.62K" [ref=f18e751]
+                        - cell "-200.46K" [ref=f18e752]
+                      - row [ref=f18e753]:
+                        - cell "Jul 10, 2026" [ref=f18e754]
+                        - cell "15" [ref=f18e755]
+                        - cell "3,279" [ref=f18e756]
+                        - cell "0" [ref=f18e757]
+                        - cell "0%" [ref=f18e758]
+                        - cell "0.5" [ref=f18e759]
+                        - cell "0.45" [ref=f18e760]
+                        - cell "61.88%" [ref=f18e761]
+                        - cell "675" [ref=f18e762]
+                        - cell "181.16K" [ref=f18e763]
+                        - cell "-189.24K" [ref=f18e764]
+                      - row [ref=f18e765]:
+                        - cell "Jul 09, 2026" [ref=f18e766]
+                        - cell "0" [ref=f18e767]
+                        - cell "3,279" [ref=f18e768]
+                        - cell "+177" [ref=f18e769]
+                        - cell "+5.71%" [ref=f18e770]
+                        - cell "0" [ref=f18e771]
+                        - cell "0.45" [ref=f18e772]
+                        - cell "61.88%" [ref=f18e773]
+                        - cell "0" [ref=f18e774]
+                        - cell "180.36K" [ref=f18e775]
+                        - cell "-188.78K" [ref=f18e776]
+                      - row [ref=f18e777]:
+                        - cell "Jul 08, 2026" [ref=f18e778]
+                        - cell "177" [ref=f18e779]
+                        - cell "3,102" [ref=f18e780]
+                        - cell "+50" [ref=f18e781]
+                        - cell "+1.64%" [ref=f18e782]
+                        - cell "0.47" [ref=f18e783]
+                        - cell "0.425" [ref=f18e784]
+                        - cell "57.50%" [ref=f18e785]
+                        - cell "7.52K" [ref=f18e786]
+                        - cell "180.85K" [ref=f18e787]
+                        - cell "-179.28K" [ref=f18e788]
+                      - row [ref=f18e789]:
+                        - cell "Jul 07, 2026" [ref=f18e790]
+                        - cell "50" [ref=f18e791]
+                        - cell "3,052" [ref=f18e792]
+                        - cell "+65" [ref=f18e793]
+                        - cell "+2.18%" [ref=f18e794]
+                        - cell "0.4" [ref=f18e795]
+                        - cell "0.5" [ref=f18e796]
+                        - cell "75.31%" [ref=f18e797]
+                        - cell "2.5K" [ref=f18e798]
+                        - cell "137K" [ref=f18e799]
+                        - cell "-159.14K" [ref=f18e800]
+                      - row [ref=f18e801]:
+                        - cell "Jul 06, 2026" [ref=f18e802]
+                        - cell "65" [ref=f18e803]
+                        - cell "2,987" [ref=f18e804]
+                        - cell "0" [ref=f18e805]
+                        - cell "0%" [ref=f18e806]
+                        - cell "0.44" [ref=f18e807]
+                        - cell "0.425" [ref=f18e808]
+                        - cell "61.56%" [ref=f18e809]
+                        - cell "2.76K" [ref=f18e810]
+                        - cell "160.46K" [ref=f18e811]
+                        - cell "-161.56K" [ref=f18e812]
+                      - row [ref=f18e813]:
+                        - cell "Jul 02, 2026" [ref=f18e814]
+                        - cell "0" [ref=f18e815]
+                        - cell "2,987" [ref=f18e816]
+                        - cell "0" [ref=f18e817]
+                        - cell "0%" [ref=f18e818]
+                        - cell "0" [ref=f18e819]
+                        - cell "0.425" [ref=f18e820]
+                        - cell "63.75%" [ref=f18e821]
+                        - cell "0" [ref=f18e822]
+                        - cell "150.69K" [ref=f18e823]
+                        - cell "-154.11K" [ref=f18e824]
+                      - row [ref=f18e825]:
+                        - cell "Jul 01, 2026" [ref=f18e826]
+                        - cell "0" [ref=f18e827]
+                        - cell "2,987" [ref=f18e828]
+                        - cell "0" [ref=f18e829]
+                        - cell "0%" [ref=f18e830]
+                        - cell "0" [ref=f18e831]
+                        - cell "0.425" [ref=f18e832]
+                        - cell "66.56%" [ref=f18e833]
+                        - cell "0" [ref=f18e834]
+                        - cell "141.88K" [ref=f18e835]
+                        - cell "-147.59K" [ref=f18e836]
+                      - row [ref=f18e837]:
+                        - cell "Jun 30, 2026" [ref=f18e838]
+                        - cell "0" [ref=f18e839]
+                        - cell "2,987" [ref=f18e840]
+                        - cell "0" [ref=f18e841]
+                        - cell "0%" [ref=f18e842]
+                        - cell "0" [ref=f18e843]
+                        - cell "0.425" [ref=f18e844]
+                        - cell "61.25%" [ref=f18e845]
+                        - cell "0" [ref=f18e846]
+                        - cell "156.4K" [ref=f18e847]
+                        - cell "-158.54K" [ref=f18e848]
+                      - row [ref=f18e849]:
+                        - cell "Jun 29, 2026" [ref=f18e850]
+                        - cell "0" [ref=f18e851]
+                        - cell "2,987" [ref=f18e852]
+                        - cell "0" [ref=f18e853]
+                        - cell "0%" [ref=f18e854]
+                        - cell "0" [ref=f18e855]
+                        - cell "0.425" [ref=f18e856]
+                        - cell "60.93%" [ref=f18e857]
+                        - cell "0" [ref=f18e858]
+                        - cell "156.46K" [ref=f18e859]
+                        - cell "-158.58K" [ref=f18e860]
+                      - row [ref=f18e861]:
+                        - cell "Jun 26, 2026" [ref=f18e862]
+                        - cell "300" [ref=f18e863]
+                        - cell "2,987" [ref=f18e864]
+                        - cell "+200" [ref=f18e865]
+                        - cell "+7.18%" [ref=f18e866]
+                        - cell "0.45" [ref=f18e867]
+                        - cell "0.425" [ref=f18e868]
+                        - cell "55.63%" [ref=f18e869]
+                        - cell "12.75K" [ref=f18e870]
+                        - cell "170.28K" [ref=f18e871]
+                        - cell "-169.07K" [ref=f18e872]
+                      - row [ref=f18e873]:
+                        - cell "Jun 25, 2026" [ref=f18e874]
+                        - cell "200" [ref=f18e875]
+                        - cell "2,787" [ref=f18e876]
+                        - cell "0" [ref=f18e877]
+                        - cell "0%" [ref=f18e878]
+                        - cell "0.55" [ref=f18e879]
+                        - cell "0.425" [ref=f18e880]
+                        - cell "50.62%" [ref=f18e881]
+                        - cell "8.5K" [ref=f18e882]
+                        - cell "172.86K" [ref=f18e883]
+                        - cell "-169.33K" [ref=f18e884]
+                      - row [ref=f18e885]:
+                        - cell "Jun 24, 2026" [ref=f18e886]
+                        - cell "0" [ref=f18e887]
+                        - cell "2,787" [ref=f18e888]
+                        - cell "+160" [ref=f18e889]
+                        - cell "+6.09%" [ref=f18e890]
+                        - cell "0" [ref=f18e891]
+                        - cell "0.425" [ref=f18e892]
+                        - cell "51.88%" [ref=f18e893]
+                        - cell "0" [ref=f18e894]
+                        - cell "168.55K" [ref=f18e895]
+                        - cell "-165.92K" [ref=f18e896]
+                      - row [ref=f18e897]:
+                        - cell "Jun 23, 2026" [ref=f18e898]
+                        - cell "160" [ref=f18e899]
+                        - cell "2,627" [ref=f18e900]
+                        - cell "+50" [ref=f18e901]
+                        - cell "+1.94%" [ref=f18e902]
+                        - cell "0.5" [ref=f18e903]
+                        - cell "0.475" [ref=f18e904]
+                        - cell "63.12%" [ref=f18e905]
+                        - cell "7.6K" [ref=f18e906]
+                        - cell "132.18K" [ref=f18e907]
+                        - cell "-144.51K" [ref=f18e908]
+                      - row [ref=f18e909]:
+                        - cell "Jun 22, 2026" [ref=f18e910]
+                        - cell "50" [ref=f18e911]
+                        - cell "2,577" [ref=f18e912]
+                        - cell "+10" [ref=f18e913]
+                        - cell "+0.39%" [ref=f18e914]
+                        - cell "0.42" [ref=f18e915]
+                        - cell "0.425" [ref=f18e916]
+                        - cell "60.31%" [ref=f18e917]
+                        - cell "2.13K" [ref=f18e918]
+                        - cell "131.84K" [ref=f18e919]
+                        - cell "-134.43K" [ref=f18e920]
+                      - row [ref=f18e921]:
+                        - cell "Jun 18, 2026" [ref=f18e922]
+                        - cell "10" [ref=f18e923]
+                        - cell "2,567" [ref=f18e924]
+                        - cell "+51" [ref=f18e925]
+                        - cell "+2.03%" [ref=f18e926]
+                        - cell "0.45" [ref=f18e927]
+                        - cell "0.425" [ref=f18e928]
+                        - cell "61.25%" [ref=f18e929]
+                        - cell "425" [ref=f18e930]
+                        - cell "126.22K" [ref=f18e931]
+                        - cell "-129.93K" [ref=f18e932]
+                      - row [ref=f18e933]:
+                        - cell "Jun 17, 2026" [ref=f18e934]
+                        - cell "51" [ref=f18e935]
+                        - cell "2,516" [ref=f18e936]
+                        - cell "0" [ref=f18e937]
+                        - cell "0%" [ref=f18e938]
+                        - cell "0.4" [ref=f18e939]
+                        - cell "0.375" [ref=f18e940]
+                        - cell "57.50%" [ref=f18e941]
+                        - cell "1.91K" [ref=f18e942]
+                        - cell "127.82K" [ref=f18e943]
+                        - cell "-121.73K" [ref=f18e944]
+                      - row [ref=f18e945]:
+                        - cell "Jun 16, 2026" [ref=f18e946]
+                        - cell "0" [ref=f18e947]
+                        - cell "2,516" [ref=f18e948]
+                        - cell "0" [ref=f18e949]
+                        - cell "0%" [ref=f18e950]
+                        - cell "0" [ref=f18e951]
+                        - cell "0.375" [ref=f18e952]
+                        - cell "69.06%" [ref=f18e953]
+                        - cell "0" [ref=f18e954]
+                        - cell "96.69K" [ref=f18e955]
+                        - cell "-100.97K" [ref=f18e956]
+                      - row [ref=f18e957]:
+                        - cell "Jun 15, 2026" [ref=f18e958]
+                        - cell "0" [ref=f18e959]
+                        - cell "2,516" [ref=f18e960]
+                        - cell "0" [ref=f18e961]
+                        - cell "0%" [ref=f18e962]
+                        - cell "0" [ref=f18e963]
+                        - cell "0.45" [ref=f18e964]
+                        - cell "60.62%" [ref=f18e965]
+                        - cell "0" [ref=f18e966]
+                        - cell "126.27K" [ref=f18e967]
+                        - cell "-134.63K" [ref=f18e968]
+                      - row [ref=f18e969]:
+                        - cell "Jun 12, 2026" [ref=f18e970]
+                        - cell "0" [ref=f18e971]
+                        - cell "2,516" [ref=f18e972]
+                        - cell "+2" [ref=f18e973]
+                        - cell "+0.08%" [ref=f18e974]
+                        - cell "0" [ref=f18e975]
+                        - cell "0.45" [ref=f18e976]
+                        - cell "65.62%" [ref=f18e977]
+                        - cell "0" [ref=f18e978]
+                        - cell "112.67K" [ref=f18e979]
+                        - cell "-123.79K" [ref=f18e980]
+                      - row [ref=f18e981]:
+                        - cell "Jun 11, 2026" [ref=f18e982]
+                        - cell "2" [ref=f18e983]
+                        - cell "2,514" [ref=f18e984]
+                        - cell "+150" [ref=f18e985]
+                        - cell "+6.35%" [ref=f18e986]
+                        - cell "0.46" [ref=f18e987]
+                        - cell "0.45" [ref=f18e988]
+                        - cell "67.19%" [ref=f18e989]
+                        - cell "90" [ref=f18e990]
+                        - cell "108.46K" [ref=f18e991]
+                        - cell "-120.48K" [ref=f18e992]
+                      - row [ref=f18e993]:
+                        - cell "Jun 10, 2026" [ref=f18e994]
+                        - cell "150" [ref=f18e995]
+                        - cell "2,364" [ref=f18e996]
+                        - cell "0" [ref=f18e997]
+                        - cell "0%" [ref=f18e998]
+                        - cell "0.5" [ref=f18e999]
+                        - cell "0.45" [ref=f18e1000]
+                        - cell "63.12%" [ref=f18e1001]
+                        - cell "6.75K" [ref=f18e1002]
+                        - cell "110.16K" [ref=f18e1003]
+                        - cell "-119.53K" [ref=f18e1004]
+                      - row [ref=f18e1005]:
+                        - cell "Jun 09, 2026" [ref=f18e1006]
+                        - cell "0" [ref=f18e1007]
+                        - cell "2,364" [ref=f18e1008]
+                        - cell "+8" [ref=f18e1009]
+                        - cell "+0.34%" [ref=f18e1010]
+                        - cell "0" [ref=f18e1011]
+                        - cell "0.425" [ref=f18e1012]
+                        - cell "61.25%" [ref=f18e1013]
+                        - cell "0" [ref=f18e1014]
+                        - cell "111.13K" [ref=f18e1015]
+                        - cell "-115.97K" [ref=f18e1016]
+                      - row [ref=f18e1017]:
+                        - cell "Jun 08, 2026" [ref=f18e1018]
+                        - cell "8" [ref=f18e1019]
+                        - cell "2,356" [ref=f18e1020]
+                        - cell "+206" [ref=f18e1021]
+                        - cell "+9.58%" [ref=f18e1022]
+                        - cell "0.5" [ref=f18e1023]
+                        - cell "0.5" [ref=f18e1024]
+                        - cell "74.84%" [ref=f18e1025]
+                        - cell "400" [ref=f18e1026]
+                        - cell "90.35K" [ref=f18e1027]
+                        - cell "-109.81K" [ref=f18e1028]
+                  - generic [ref=f18e1029]:
+                    - generic [ref=f18e1030]:
+                      - button "Previous" [disabled]
+                    - generic [ref=f18e1031]:
+                      - generic [ref=f18e1032]: Page 1 of 3
+                      - button "50 Rows" [ref=f18e1033] [cursor=pointer]
+                    - button "Next" [ref=f18e1038] [cursor=pointer]
+                  - button "Back to Top" [ref=f18e1043] [cursor=pointer]
+                - checkbox "Close modal Close"
+        - checkbox "Alert Alert Close modal Cancel"
+        - option "Price target" [selected]
+        - option "Moving average cross"
+        - option "Percent move"
+        - option "Volume spike"
+        - option "Above" [selected]
+        - option "Below"
+      - contentinfo [ref=f18e161]:
+        - generic [ref=f18e162]:
+          - generic [ref=f18e163]:
+            - generic [ref=f18e164]:
+              - img "logo" [ref=f18e165]
+              - generic [ref=f18e166]:
+                - text: Stocknear
+                - paragraph [ref=f18e167]: All-in-one Stock Analysis Platform to research your trading ideas.
+            - generic [ref=f18e168]:
+              - navigation [ref=f18e169]:
+                - paragraph [ref=f18e170]: Sections
+                - list [ref=f18e171]:
+                  - listitem [ref=f18e172]:
+                    - link "Stocks" [ref=f18e173] [cursor=pointer]:
+                      - /url: /stocks/
+                  - listitem [ref=f18e174]:
+                    - link "IPOs" [ref=f18e175] [cursor=pointer]:
+                      - /url: /ipos/
+                  - listitem [ref=f18e176]:
+                    - link "ETFs" [ref=f18e177] [cursor=pointer]:
+                      - /url: /etf/
+                  - listitem [ref=f18e178]:
+                    - link "Portfolio" [ref=f18e179] [cursor=pointer]:
+                      - /url: /portfolio/
+                  - listitem [ref=f18e180]:
+                    - link "Learning Center" [ref=f18e181] [cursor=pointer]:
+                      - /url: /learning-center/
+              - navigation [ref=f18e182]:
+                - paragraph [ref=f18e183]: Services
+                - list [ref=f18e184]:
+                  - listitem [ref=f18e185]:
+                    - link "Pricing Plan" [ref=f18e186] [cursor=pointer]:
+                      - /url: /pricing/
+                  - listitem [ref=f18e187]:
+                    - link "Get Support" [ref=f18e188] [cursor=pointer]:
+                      - /url: /support/
+                  - listitem [ref=f18e189]:
+                    - link "Install MCP Server" [ref=f18e190] [cursor=pointer]:
+                      - /url: /mcp
+                  - listitem [ref=f18e191]:
+                    - link "Install the App" [ref=f18e192] [cursor=pointer]:
+                      - /url: /app/
+              - navigation [ref=f18e193]:
+                - paragraph [ref=f18e194]: Website
+                - list [ref=f18e195]:
+                  - listitem [ref=f18e196]:
+                    - link "Login" [ref=f18e197] [cursor=pointer]:
+                      - /url: /login/
+                  - listitem [ref=f18e198]:
+                    - link "FAQ" [ref=f18e199] [cursor=pointer]:
+                      - /url: /faq/
+                  - listitem [ref=f18e200]:
+                    - link "Sitemap" [ref=f18e201] [cursor=pointer]:
+                      - /url: /sitemap/
+                  - listitem [ref=f18e202]:
+                    - generic [ref=f18e203]:
+                      - button "Set light theme" [ref=f18e204] [cursor=pointer]: Light
+                      - button "Set dark theme" [pressed] [ref=f18e211] [cursor=pointer]: Dark
+                      - generic [ref=f18e214]: Toggle theme
+                  - listitem [ref=f18e215]:
+                    - group [ref=f18e216]:
+                      - generic "Switch language en" [ref=f18e217] [cursor=pointer]:
+                        - generic [ref=f18e218]: Switch language
+                        - generic [ref=f18e219]: 🇺🇸
+                        - generic [ref=f18e220]: en
+              - navigation [ref=f18e223]:
+                - paragraph [ref=f18e224]: Company
+                - list [ref=f18e225]:
+                  - listitem [ref=f18e226]:
+                    - link "About" [ref=f18e227] [cursor=pointer]:
+                      - /url: /about/
+                  - listitem [ref=f18e228]:
+                    - link "Contact Us" [ref=f18e229] [cursor=pointer]:
+                      - /url: /contact/
+                  - listitem [ref=f18e230]:
+                    - link "Terms of Use" [ref=f18e231] [cursor=pointer]:
+                      - /url: /terms-of-use/
+                  - listitem [ref=f18e232]:
+                    - link "Privacy Policy" [ref=f18e233] [cursor=pointer]:
+                      - /url: /privacy-policy/
+                  - listitem [ref=f18e234]:
+                    - link "Data Disclaimer" [ref=f18e235] [cursor=pointer]:
+                      - /url: /data-disclaimer/
+                  - listitem [ref=f18e236]:
+                    - link "Imprint" [ref=f18e237] [cursor=pointer]:
+                      - /url: /imprint/
+          - generic [ref=f18e238]:
+            - generic [ref=f18e239]:
+              - link "Join us on Reddit" [ref=f18e240] [cursor=pointer]:
+                - /url: https://www.youtube.com/@stocknear
+                - img:
+                  - generic "Youtube-color"
+              - link "Join us on Reddit" [ref=f18e241] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/stocknear/
+              - link "Join us on Discord" [ref=f18e242] [cursor=pointer]:
+                - /url: https://discord.gg/hCwZMMZ2MT
+              - link "Follow on X" [ref=f18e243] [cursor=pointer]:
+                - /url: https://twitter.com/intent/follow?screen_name=stocknear
+            - generic [ref=f18e244]: © 2026 Stocknear. All rights reserved.
+    - generic "Give feedback" [ref=f18e1046] [cursor=pointer]
+    - checkbox "Give feedback Close modal"
+    - navigation "Primary navigation" [ref=f18e245]:
+      - generic [ref=f18e246]:
+        - link "Home" [ref=f18e247] [cursor=pointer]:
+          - /url: /
+        - link "Portfolio" [ref=f18e253] [cursor=pointer]:
+          - /url: /portfolio
+        - link "Watchlist" [ref=f18e259] [cursor=pointer]:
+          - /url: /watchlist/stocks
+        - link "Alert" [ref=f18e264] [cursor=pointer]:
+          - /url: /alerts
+        - link "Chat" [ref=f18e272] [cursor=pointer]:
+          - /url: /chat
+    - generic [ref=f18e1051]:
+      - heading "We value your privacy" [level=3] [ref=f18e1055]
+      - paragraph [ref=f18e1056]: We use cookies to enhance your browsing experience, analyze site traffic, and personalize content.
+      - generic [ref=f18e1057]:
+        - button "Accept All" [ref=f18e1058] [cursor=pointer]
+        - button "Reject All" [ref=f18e1059] [cursor=pointer]
+        - button "Customize" [ref=f18e1060] [cursor=pointer]
+  - menu "Download" [active] [ref=f18e1062]:
+    - group [ref=f18e1063]:
+      - menuitem "Download to CSV" [ref=f18e1064] [cursor=pointer]
+      - menuitem "Download to Excel" [ref=f18e1066] [cursor=pointer]

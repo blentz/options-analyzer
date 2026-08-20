@@ -1,0 +1,146 @@
+- generic [ref=e5]:
+  - generic [ref=e6]:
+    - button "Toggle Menu" [ref=e7] [cursor=pointer]
+    - link "Stocknear Logo Stocknear" [ref=e10] [cursor=pointer]:
+      - /url: /
+      - img "Stocknear Logo" [ref=e11]
+      - generic [ref=e12]: Stocknear
+    - generic [ref=e13]:
+      - generic [ref=e18]:
+        - combobox "Company or stock symbol..." [ref=e22]
+        - generic [ref=e23]:
+          - generic:
+            - generic: ctrl
+            - generic: K
+      - link "Sign up" [ref=e25] [cursor=pointer]:
+        - /url: /register
+      - link "Log in" [ref=e27] [cursor=pointer]:
+        - /url: /login
+  - main [ref=e31]:
+    - generic [ref=e33]:
+      - link [ref=e35] [cursor=pointer]:
+        - /url: /
+        - img "Stocknear Logo" [ref=e36]
+      - generic [ref=e37]:
+        - heading "Log in to your account" [level=1] [ref=e38]
+        - paragraph [ref=e39]: Welcome back!
+        - generic [ref=e41]:
+          - button "Google Login" [ref=e43] [cursor=pointer]
+          - button "Discord Login" [ref=e51] [cursor=pointer]
+          - button "Github Login" [ref=e55] [cursor=pointer]
+        - generic [ref=e58]: Or login using
+        - generic [ref=e60]:
+          - generic [ref=e61]:
+            - generic [ref=e62]: Email
+            - textbox "Email" [ref=e65]:
+              - /placeholder: ""
+          - generic [ref=e66]:
+            - generic [ref=e67]: Password
+            - textbox "Password" [ref=e70]:
+              - /placeholder: ""
+          - link "Forgot Password?" [ref=e72] [cursor=pointer]:
+            - /url: /reset-password
+          - button "Login" [ref=e74]
+        - paragraph [ref=e75]:
+          - text: You don't have an account?
+          - link "Sign up" [ref=e76] [cursor=pointer]:
+            - /url: /register
+  - contentinfo [ref=e78]:
+    - generic [ref=e79]:
+      - generic [ref=e80]:
+        - generic [ref=e81]:
+          - img "logo" [ref=e82]
+          - generic [ref=e83]:
+            - text: Stocknear
+            - paragraph [ref=e84]: All-in-one Stock Analysis Platform to research your trading ideas.
+        - generic [ref=e85]:
+          - navigation [ref=e86]:
+            - paragraph [ref=e87]: Sections
+            - list [ref=e88]:
+              - listitem [ref=e89]:
+                - link "Stocks" [ref=e90] [cursor=pointer]:
+                  - /url: /stocks/
+              - listitem [ref=e91]:
+                - link "IPOs" [ref=e92] [cursor=pointer]:
+                  - /url: /ipos/
+              - listitem [ref=e93]:
+                - link "ETFs" [ref=e94] [cursor=pointer]:
+                  - /url: /etf/
+              - listitem [ref=e95]:
+                - link "Portfolio" [ref=e96] [cursor=pointer]:
+                  - /url: /portfolio/
+              - listitem [ref=e97]:
+                - link "Learning Center" [ref=e98] [cursor=pointer]:
+                  - /url: /learning-center/
+          - navigation [ref=e99]:
+            - paragraph [ref=e100]: Services
+            - list [ref=e101]:
+              - listitem [ref=e102]:
+                - link "Pricing Plan" [ref=e103] [cursor=pointer]:
+                  - /url: /pricing/
+              - listitem [ref=e104]:
+                - link "Get Support" [ref=e105] [cursor=pointer]:
+                  - /url: /support/
+              - listitem [ref=e106]:
+                - link "Install MCP Server" [ref=e107] [cursor=pointer]:
+                  - /url: /mcp
+              - listitem [ref=e108]:
+                - link "Install the App" [ref=e109] [cursor=pointer]:
+                  - /url: /app/
+          - navigation [ref=e110]:
+            - paragraph [ref=e111]: Website
+            - list [ref=e112]:
+              - listitem [ref=e113]:
+                - link "Login" [ref=e114] [cursor=pointer]:
+                  - /url: /login/
+              - listitem [ref=e115]:
+                - link "FAQ" [ref=e116] [cursor=pointer]:
+                  - /url: /faq/
+              - listitem [ref=e117]:
+                - link "Sitemap" [ref=e118] [cursor=pointer]:
+                  - /url: /sitemap/
+              - listitem [ref=e119]:
+                - generic [ref=e120]:
+                  - button "Set light theme" [ref=e121] [cursor=pointer]: Light
+                  - button "Set dark theme" [pressed] [ref=e128] [cursor=pointer]: Dark
+                  - generic [ref=e131]: Toggle theme
+              - listitem [ref=e132]:
+                - group [ref=e133]:
+                  - generic "Switch language en" [ref=e134] [cursor=pointer]:
+                    - generic [ref=e135]: Switch language
+                    - generic [ref=e136]: 🇺🇸
+                    - generic [ref=e137]: en
+          - navigation [ref=e140]:
+            - paragraph [ref=e141]: Company
+            - list [ref=e142]:
+              - listitem [ref=e143]:
+                - link "About" [ref=e144] [cursor=pointer]:
+                  - /url: /about/
+              - listitem [ref=e145]:
+                - link "Contact Us" [ref=e146] [cursor=pointer]:
+                  - /url: /contact/
+              - listitem [ref=e147]:
+                - link "Terms of Use" [ref=e148] [cursor=pointer]:
+                  - /url: /terms-of-use/
+              - listitem [ref=e149]:
+                - link "Privacy Policy" [ref=e150] [cursor=pointer]:
+                  - /url: /privacy-policy/
+              - listitem [ref=e151]:
+                - link "Data Disclaimer" [ref=e152] [cursor=pointer]:
+                  - /url: /data-disclaimer/
+              - listitem [ref=e153]:
+                - link "Imprint" [ref=e154] [cursor=pointer]:
+                  - /url: /imprint/
+      - generic [ref=e155]:
+        - generic [ref=e156]:
+          - link "Join us on Reddit" [ref=e157] [cursor=pointer]:
+            - /url: https://www.youtube.com/@stocknear
+            - img:
+              - generic "Youtube-color"
+          - link "Join us on Reddit" [ref=e158] [cursor=pointer]:
+            - /url: https://www.reddit.com/r/stocknear/
+          - link "Join us on Discord" [ref=e159] [cursor=pointer]:
+            - /url: https://discord.gg/hCwZMMZ2MT
+          - link "Follow on X" [ref=e160] [cursor=pointer]:
+            - /url: https://twitter.com/intent/follow?screen_name=stocknear
+        - generic [ref=e161]: © 2026 Stocknear. All rights reserved.

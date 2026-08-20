@@ -261,8 +261,12 @@
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
             <button onclick="SpecApp.addLeg()" class="btn btn-secondary">+ Add Leg</button>
             <button onclick="SpecApp.fetchAllQuotes()" class="btn btn-secondary" title="Fetch quotes for all legs in one request">Refresh Quotes</button>
+            <button id="sync-history-btn" onclick="SpecApp.syncHistory()" class="btn btn-secondary"
+                    title="Download full price history for these legs plus any open positions. Launches a browser — roughly 15s plus 2-4s per contract.">Sync History</button>
             <button onclick="SpecApp.analyzeStrategy()" class="btn btn-primary">Analyze Strategy</button>
         </div>
+
+        <div id="sync-history-status" style="margin-top: 0.5rem; font-size: 0.9rem;"></div>
     </div>
 </div>
 
