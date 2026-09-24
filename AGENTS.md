@@ -85,12 +85,16 @@ project name in `pyproject.toml`.
 | `app/services/csv_import.py` | Fidelity CSV parsing, trade/position creation |
 | `app/services/analytics.py` | Statistics queries and aggregations |
 | `app/services/risk_analysis.py` | Options payoff calculations |
+| `app/services/bs_math.py` | Pure Black-Scholes: pricing, Greeks, probabilities, exact spot/IV solvers |
+| `app/services/exit_conditions.py` | Scenario Lab builders: target-price conditions, spot x time P&L matrix, IV selection |
+| `app/routers/scenario_lab.py` | `GET /api/risk/scenario-lab` — per-position holistic analysis |
 | `app/services/price_service.py` | Yahoo Finance API client with caching |
 | `app/services/stocknear_mcp.py` | StockNear MCP client: options overview, max pain, stock quote, expirations |
 | `templates/base.html` | Base template with nav, styles |
 | `templates/dashboard.html` | Main dashboard with stats and charts |
 | `templates/positions.html` | Position list with filters |
-| `templates/risk.html` | Risk analysis page |
+| `templates/risk.html` | Risk analysis page (per-position tabs: Payoff, Exit Scenarios, Scenario Lab) |
+| `static/risk.js` | Risk page interactivity and Scenario Lab rendering |
 | `templates/import.html` | CSV upload form |
 
 ## Gotchas

@@ -11,6 +11,9 @@ This module is the source of truth for:
   - _estimate_delta (assignment probability ≈ N(d2))
   - calculate_price_at_delta (inverse: solve for S at target ITM probability)
   - _calculate_price_probability (P(S_T > target) under risk-neutral measure)
+  - calculate_touch_probability (P(path hits a barrier before expiry))
+  - solve_spot_for_option_price / solve_iv_for_option_price (exact inverses
+    of calculate_option_price by bisection)
 
 All angles use natural log/exp. All times are in years (days / 365).
 """
@@ -325,3 +328,119 @@ def calculate_price_at_delta(
     except Exception:
         return strike
 
+
+
+def calculate_touch_probability(
+    current_price: float,
+    barrier: float,
+    days_to_expiry: float,
+    volatility: float = DEFAULT_VOLATILITY,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> float:
+    """
+    Probability the underlying touches `barrier` at any time before expiry.
+
+    Closed-form first-passage probability for GBM under the risk-neutral
+    measure. With X_t = ln(S_t/S_0) = mu*t + sigma*W_t, mu = r - sigma^2/2,
+    b = ln(H/S_0):
+      upper (b > 0): N((mu*T - b)/(sigma*sqrt(T))) + e^(2*mu*b/sigma^2) * N((-b - mu*T)/(sigma*sqrt(T)))
+      lower (b < 0): N((b - mu*T)/(sigma*sqrt(T))) + e^(2*mu*b/sigma^2) * N((b + mu*T)/(sigma*sqrt(T)))
+
+    A resting limit order fills on a touch, not on the expiry close, so this
+    is the relevant number for "will my buy-to-close order fill". It is
+    always >= the terminal probability from _calculate_price_probability.
+    """
+    if current_price <= 0 or barrier <= 0:
+        return 0.0
+    if barrier == current_price:
+        return 1.0
+    if days_to_expiry <= 0 or volatility <= 0:
+        return 0.0
+
+    T = days_to_expiry / CALENDAR_DAYS_PER_YEAR
+    sig_sqrt_t = volatility * math.sqrt(T)
+    mu = risk_free_rate - 0.5 * volatility ** 2
+    b = math.log(barrier / current_price)
+    reflection = math.exp(2.0 * mu * b / volatility ** 2)
+    if b > 0:
+        p = _norm_cdf((mu * T - b) / sig_sqrt_t) + reflection * _norm_cdf((-b - mu * T) / sig_sqrt_t)
+    else:
+        p = _norm_cdf((b - mu * T) / sig_sqrt_t) + reflection * _norm_cdf((b + mu * T) / sig_sqrt_t)
+    return min(1.0, max(0.0, p))
+
+
+def _bisect(f, lo: float, hi: float, tol: float = 1e-7, max_iter: int = 200) -> Optional[float]:
+    """Root of monotonic f on [lo, hi], or None when f(lo), f(hi) share a sign."""
+    f_lo, f_hi = f(lo), f(hi)
+    if f_lo == 0:
+        return lo
+    if f_hi == 0:
+        return hi
+    if (f_lo > 0) == (f_hi > 0):
+        return None
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2
+        f_mid = f(mid)
+        if f_mid == 0 or (hi - lo) / 2 < tol:
+            return mid
+        if (f_mid > 0) == (f_lo > 0):
+            lo, f_lo = mid, f_mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def solve_spot_for_option_price(
+    option_type: str,
+    strike: float,
+    target_price: float,
+    days_to_expiry: float,
+    volatility: float = DEFAULT_VOLATILITY,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> Optional[float]:
+    """
+    Underlying price at which the Black-Scholes value equals `target_price`.
+
+    Exact inverse of calculate_option_price in the spot dimension. Replaces
+    the delta-linear estimate, which ignores gamma and under-states the
+    move needed for cheap OTM targets (HITI $2.50P, $0.10 -> $0.05: linear
+    says $2.81, exact says $2.93).
+
+    Returns None when no spot produces the target (target <= 0, or a put
+    target at/above the discounted strike).
+    """
+    if target_price <= 0 or strike <= 0:
+        return None
+    is_call = option_type.upper() == "CALL"
+    if days_to_expiry <= 0:
+        return strike + target_price if is_call else (strike - target_price if target_price < strike else None)
+
+    # Price is monotonic in spot: increasing for calls, decreasing for puts.
+    def f(s: float) -> float:
+        return calculate_option_price(option_type, s, strike, days_to_expiry, volatility, risk_free_rate) - target_price
+
+    return _bisect(f, strike * 1e-4, strike * 50, tol=strike * 1e-8)
+
+
+def solve_iv_for_option_price(
+    option_type: str,
+    spot: float,
+    strike: float,
+    days_to_expiry: float,
+    option_price: float,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> Optional[float]:
+    """
+    Implied volatility that makes the Black-Scholes value equal `option_price`.
+
+    Used to back IV out of a live mid so the model is anchored to the price
+    the position can actually be traded at. Returns None at expiry, or when
+    the price is outside the no-arbitrage range for any IV in [0.1%, 1000%].
+    """
+    if days_to_expiry <= 0 or option_price <= 0 or spot <= 0 or strike <= 0:
+        return None
+
+    def f(v: float) -> float:
+        return calculate_option_price(option_type, spot, strike, days_to_expiry, v, risk_free_rate) - option_price
+
+    return _bisect(f, 0.001, 10.0)

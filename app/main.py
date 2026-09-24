@@ -210,8 +210,10 @@ app.add_middleware(DebugGateMiddleware)
 # every route on this router unless ENABLE_DEBUG_ENDPOINTS=true.
 from app.routers import debug as _debug_router  # noqa: E402
 from app.routers import positions as _positions_router  # noqa: E402
+from app.routers import scenario_lab as _scenario_lab_router  # noqa: E402
 app.include_router(_debug_router.router)
 app.include_router(_positions_router.router)
+app.include_router(_scenario_lab_router.router)
 
 if not app_settings.api_key:
     logging.getLogger(__name__).warning(

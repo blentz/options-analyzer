@@ -44,6 +44,7 @@ from app.services.bs_math import (
     calculate_option_greeks,
     calculate_option_price,
     calculate_price_at_delta,
+    solve_spot_for_option_price,
 )
 
 logger = logging.getLogger(__name__)
@@ -304,10 +305,9 @@ def estimate_underlying_for_option_value(
 ) -> tuple[float, float, float]:
     """
     Estimate the underlying price where option would trade at target value.
-    Uses delta approximation with volatility-based confidence interval.
-    
-    Note: This is a linear approximation using delta. It becomes less accurate
-    for large price moves due to gamma (delta changes as price moves).
+    Solves the Black-Scholes curve exactly, with a volatility-based
+    confidence interval. Falls back to the delta line only when the target
+    is outside the model's range.
     
     Args:
         option_type: "CALL" or "PUT"
@@ -345,11 +345,17 @@ def estimate_underlying_for_option_value(
         upper_bound = current_price * math.exp(drift + 3.0 * volatility * math.sqrt(T))
         return (current_price, lower_bound, upper_bound)
     
-    # Delta approximation: dOption = delta * dUnderlying
-    # new_price = current_price + value_change_needed / delta
-    # Note: No division by 100 - delta is already per-share
-    price_change_needed = value_change_needed / effective_delta
-    estimated_price = current_price + price_change_needed
+    # Solve the full BS curve (captures gamma) for the same value CHANGE the
+    # caller asked for, anchored at the model value at current_price. The
+    # offset keeps the caller's current_option_value meaningful even when it
+    # disagrees with the model (e.g. a live mid vs. a scraped IV).
+    model_now = calculate_option_price(option_type, current_price, strike, days_to_expiry, volatility)
+    estimated_price = solve_spot_for_option_price(
+        option_type, strike, model_now + value_change_needed, days_to_expiry, volatility
+    )
+    if estimated_price is None:
+        # Target outside the model's range — fall back to the delta line.
+        estimated_price = current_price + value_change_needed / effective_delta
 
     # Calculate confidence interval using lognormal distribution
     # Stock prices follow: S_T = S_0 * exp((r - σ²/2)T + σ√T * Z)
