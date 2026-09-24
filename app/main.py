@@ -89,12 +89,9 @@ from pydantic import BaseModel
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup; release persistent browser on shutdown."""
+    """Initialize database and start the cache janitor."""
     import asyncio as _asyncio
-    from app.services.stocknear_service import (
-        shutdown_persistent_scraper, cleanup_expired_cache,
-        _get_or_start_persistent_scraper,
-    )
+    from app.services.stocknear_service import cleanup_expired_cache
     from app.database import async_session
 
     await init_db()
@@ -111,36 +108,15 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).exception("Cache janitor iteration failed")
             await _asyncio.sleep(3600)
 
-    # Pre-warm the Playwright browser in the background. The first scraper
-    # call otherwise pays a 5-10s Firefox-launch + cookies-injection cost
-    # synchronously inside the user's first /speculation lookup. By spinning
-    # it up at startup we let uvicorn finish booting (so /health works
-    # immediately) and the browser is hot by the time anyone hits a scraping
-    # endpoint. Failure to pre-warm is non-fatal — actual usage will retry.
-    async def _prewarm_scraper():
-        try:
-            await _asyncio.to_thread(_get_or_start_persistent_scraper)
-            logging.getLogger(__name__).info("Persistent Playwright scraper pre-warmed")
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Pre-warm failed — first scraper call will pay the launch cost"
-            )
-
     janitor_task = _asyncio.create_task(_cache_janitor())
-    prewarm_task = _asyncio.create_task(_prewarm_scraper())
 
     try:
         yield
     finally:
-        for t in (janitor_task, prewarm_task):
-            t.cancel()
-            try:
-                await t
-            except _asyncio.CancelledError:
-                pass
+        janitor_task.cancel()
         try:
-            await _asyncio.to_thread(shutdown_persistent_scraper)
-        except Exception:
+            await janitor_task
+        except _asyncio.CancelledError:
             pass
 
 
@@ -187,8 +163,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 class DebugGateMiddleware(BaseHTTPMiddleware):
     """Block all /api/debug/* routes unless ENABLE_DEBUG_ENDPOINTS=true.
 
-    Debug endpoints return raw scraped HTML, screenshots, and session-bound
-    page text. Disabled in production by default to prevent accidental data
+    Debug endpoints return raw MCP payloads and uncached contract quotes. Disabled in production by default to prevent accidental data
     leakage if the app is exposed beyond localhost.
     """
 
@@ -222,7 +197,7 @@ if not app_settings.api_key:
     )
 if app_settings.enable_debug_endpoints:
     logging.getLogger(__name__).warning(
-        "ENABLE_DEBUG_ENDPOINTS=true — /api/debug/* exposed (raw scraped data)."
+        "ENABLE_DEBUG_ENDPOINTS=true — /api/debug/* exposed (raw StockNear data)."
     )
 if not app_settings.stocknear_mcp_token:
     logging.getLogger(__name__).warning(
@@ -264,10 +239,23 @@ def _carry_qs(request: Request) -> str:
 # needing to pass it explicitly.
 templates.env.globals["carry_qs"] = _carry_qs
 
-# Static files
+# BokehJS on the page must match the Python bokeh that serialises the charts.
+import bokeh as _bokeh  # noqa: E402
+templates.env.globals["bokeh_version"] = _bokeh.__version__
+
+# Static files. "no-cache" makes browsers revalidate (a cheap 304 via the
+# ETag) instead of heuristically reusing an old copy — without it, a
+# rebuilt container kept serving users the previous risk.js/speculation.js.
+class _RevalidatingStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.mount("/static", _RevalidatingStaticFiles(directory=str(static_dir)), name="static")
 
 
 @app.post("/api/import/diagnose")
@@ -463,8 +451,7 @@ async def cycles_page(
             "members": members_view,
         })
 
-    return templates.TemplateResponse("cycles.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "cycles.html", {
         "cycles": view_rows,
         "date_range": date_range,
         "preset_labels": PRESET_RANGE_LABELS,
@@ -549,11 +536,11 @@ async def sync_contract_history(
     body: Optional[ContractHistorySyncRequest] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Download and store price history for open positions, plus named legs.
+    """Fetch and store price history for open positions, plus named legs.
 
     User-triggered and blocking, matching /api/positions/heal and
-    /api/cycles/rebuild. One browser session covers the whole batch, so
-    cost is roughly 15s of launch plus 2-4s per contract.
+    /api/cycles/rebuild. Contracts are fetched concurrently from
+    StockNear's contract JSON API, well under a second each.
 
     With no body this syncs open positions only, which is what the
     positions page has always done. The speculation page posts the legs
@@ -561,7 +548,7 @@ async def sync_contract_history(
     not held gets history too — an option_contracts row is created for it
     on demand.
 
-    Idempotent: each download is a complete history, so re-running
+    Idempotent: each fetch is a complete history, so re-running
     converges rather than duplicating.
     """
     from datetime import datetime as _datetime
@@ -666,8 +653,7 @@ async def dashboard(
     winloss_script, winloss_div = create_win_loss_chart(stats.winners, stats.losers)
     strategy_script, strategy_div = create_strategy_chart(strategy_data)
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "stats": stats,
         "cumulative_script": cumulative_script,
         "cumulative_div": cumulative_div,
@@ -722,7 +708,7 @@ async def positions_page(
     # contract_pk so the template can look each row's status up directly.
     # Without this the status shown by the sync button is transient — it
     # clears on reload — so a contract that fails every sync (e.g.
-    # ProGatedError) becomes invisible the moment the user navigates away.
+    # an unknown contract) becomes invisible the moment the user navigates away.
     from app.models import ContractHistorySync
     contract_pks = [p.contract_pk for p in positions]
     sync_status: dict = {}
@@ -736,8 +722,7 @@ async def positions_page(
         ).scalars().all()
         sync_status = {s.contract_id: s for s in sync_rows}
 
-    return templates.TemplateResponse("positions.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "positions.html", {
         "positions": positions,
         "sync_status": sync_status,
         "show_closed_only": closed,
@@ -752,8 +737,7 @@ async def positions_page(
 @app.get("/import", response_class=HTMLResponse)
 async def import_page(request: Request):
     """CSV import page."""
-    return templates.TemplateResponse("import.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "import.html", {
         "message": None,
         "error": None
     })
@@ -829,8 +813,7 @@ async def import_csv_files(
         "files_failed": files_failed
     }
 
-    return templates.TemplateResponse("import.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "import.html", {
         "results": results,
         "summary": summary if len(files) > 1 else None,
         "error": None
@@ -904,8 +887,7 @@ async def risk_analysis_page(request: Request, db: AsyncSession = Depends(get_db
             "theta_div": theta_div
         })
 
-    return templates.TemplateResponse("risk.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "risk.html", {
         "risk_summary": risk_summary,
         "combined_script": combined_script,
         "combined_div": combined_div,
@@ -1238,8 +1220,7 @@ class SpeculationRequest(BaseModel):
 @app.get("/speculation", response_class=HTMLResponse)
 async def speculation_page(request: Request, db: AsyncSession = Depends(get_db)):
     """Options speculation analysis page."""
-    return templates.TemplateResponse("speculation.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "speculation.html", {
         "strategy_templates": STRATEGY_TEMPLATES
     })
 
@@ -1338,51 +1319,6 @@ async def api_speculation_nearest_strikes(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-async def api_speculation_chain(
-    symbol: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get full options chain for a symbol.
-    
-    Returns available strikes, bids, asks, greeks for each contract.
-    """
-    try:
-        chain = await get_options_chain(db, symbol)
-        if not chain:
-            raise HTTPException(status_code=404, detail=f"No options chain found for {symbol}")
-        
-        return {
-            "symbol": chain.symbol,
-            "current_price": chain.current_price,
-            "expirations": chain.expirations,
-            "implied_volatility": chain.implied_volatility,
-            "iv_rank": chain.iv_rank,
-            "iv_percentile": chain.iv_percentile,
-            "contracts": [
-                {
-                    "strike": c.strike,
-                    "option_type": c.option_type,
-                    "expiration": c.expiration,
-                    "bid": c.bid,
-                    "ask": c.ask,
-                    "last": c.last,
-                    "volume": c.volume,
-                    "open_interest": c.open_interest,
-                    "implied_volatility": c.implied_volatility,
-                    "delta": c.delta,
-                    "gamma": c.gamma,
-                    "theta": c.theta,
-                    "vega": c.vega,
-                }
-                for c in chain.contracts
-            ]
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/speculation/analyze")
 async def api_speculation_analyze(
@@ -1786,17 +1722,14 @@ async def api_speculation_quotes_batch(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Batch fetch quotes for multiple option contracts in a SINGLE browser session.
-    
-    Much more efficient than calling /contract-quote multiple times.
-    Reduces 4 browser launches (for 4-leg strategy) to just 1.
+    Batch fetch quotes for multiple option contracts concurrently.
     
     Request body:
         contracts: List of {symbol, expiration, strike, option_type}
         force_refresh: If True, bypass cache
     
     Returns:
-        List of quote objects in same order as input
+        List of quote objects in same order as input; null where a fetch failed
     """
     from app.services.stocknear_service import get_contract_quotes_batch
     
@@ -1846,7 +1779,7 @@ async def api_speculation_quotes_batch(
                 "delta": q.delta,
                 "theta": q.theta,
                 "spread_quality": q.spread_quality,
-            }
+            } if q is not None else None
             for q in quotes
         ]
     }

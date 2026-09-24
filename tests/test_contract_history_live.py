@@ -1,53 +1,35 @@
-"""Live end-to-end download against Stocknear.
+"""Live end-to-end history fetch against StockNear's contract API.
 
 Deselected by default. Run explicitly:
     pytest tests/test_contract_history_live.py -m live -v
 
-Requires STOCKNEAR_BROWSER_PROFILE_PATH to point at a Firefox/LibreWolf
-profile with a valid logged-in Stocknear session, and a subscription tier
-covering the expiration below.
-
-If this test raises ProGatedError, that is NOT a test failure: it means the
-configured subscription tier does not cover this contract's expiration, and
-it means the substitution guard is working correctly. Do not go debugging
-the download code over it -- check the subscription tier instead.
-
 MAINTENANCE: the contract below (HITI261016P00002500) expires 2026-10-16.
-On or after that date this test will fail (or raise ProGatedError) simply
-because the contract no longer exists, regardless of session or
-subscription validity -- update CONTRACT/SYMBOL below to a currently live
-expiration. Any contract with an open position and a live expiration works
-as a replacement; the row-count assertion is a floor (> 50), not an exact
-figure, precisely so a substitute doesn't need identical data.
+After that date StockNear may stop serving it and this test will fail with
+"unknown contract" regardless of the code — update CONTRACT/SYMBOL to a
+live expiration. The row-count assertion is a floor (> 50), not an exact
+figure, so a substitute doesn't need identical data.
 """
 
-import tempfile
-from pathlib import Path
+import asyncio
 
 import pytest
 
-from app.config import settings
-from app.services.contract_history import parse_history_csv
-from app.stocknear import StockNearScraper
+from app.services.contract_history import parse_history_json
+from app.services.stocknear_contract_api import fetch_contract_history
 
 CONTRACT = "HITI261016P00002500"
 SYMBOL = "HITI"
 
 
 @pytest.mark.live
-def test_downloads_and_parses_real_contract():
-    if not settings.stocknear_browser_profile_path:
-        pytest.skip("STOCKNEAR_BROWSER_PROFILE_PATH not configured")
+def test_fetches_and_parses_real_contract():
+    payload = asyncio.run(fetch_contract_history(SYMBOL, CONTRACT))
+    rows = parse_history_json(payload, CONTRACT)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with StockNearScraper() as scraper:
-            path = scraper.download_contract_history(SYMBOL, CONTRACT, Path(tmpdir))
-
-        assert path.exists()
-        rows = parse_history_csv(path)
-
-        assert len(rows) > 50
-        assert all(r.date is not None for r in rows)
-        # IV is a decimal fraction, not a percentage.
-        ivs = [r.implied_volatility for r in rows if r.implied_volatility is not None]
-        assert ivs and all(0 < iv < 10 for iv in ivs)
+    assert len(rows) > 50
+    assert rows == sorted(rows, key=lambda r: r.date)
+    # IV is a decimal fraction, not a percentage.
+    ivs = [r.implied_volatility for r in rows if r.implied_volatility is not None]
+    assert ivs and all(0 < iv < 10 for iv in ivs)
+    # dte is derived from the payload's expiration.
+    assert all(r.dte is not None and r.dte >= 0 for r in rows)

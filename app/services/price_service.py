@@ -50,9 +50,9 @@ async def get_stock_price(symbol: str) -> Optional[StockQuote]:
     """
     # Check cache first
     if symbol in _price_cache:
-        quote, cached_at = _price_cache[symbol]
+        cached_quote, cached_at = _price_cache[symbol]
         if datetime.now() - cached_at < timedelta(seconds=CACHE_TTL_SECONDS):
-            return quote
+            return cached_quote
 
     # Fetch from Yahoo Finance
     quote = await _fetch_yahoo_quote(symbol)
@@ -140,7 +140,7 @@ def clear_cache():
     _price_cache.clear()
 
 
-async def get_option_chain(symbol: str, expiration_date: str = None) -> list[OptionQuote]:
+async def get_option_chain(symbol: str, expiration_date: Optional[str] = None) -> list[OptionQuote]:
     """
     Fetch options chain from Yahoo Finance for a given symbol.
     
@@ -168,7 +168,7 @@ async def get_option_chain(symbol: str, expiration_date: str = None) -> list[Opt
     return quotes
 
 
-async def _fetch_yahoo_options(symbol: str, expiration_date: str = None) -> list[OptionQuote]:
+async def _fetch_yahoo_options(symbol: str, expiration_date: Optional[str] = None) -> list[OptionQuote]:
     """Fetch options chain from Yahoo Finance using yfinance library."""
     import yfinance as yf
     

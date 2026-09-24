@@ -59,10 +59,9 @@ Win/loss determination uses `total_pnl` to account for assignment outcomes.
 
 ```bash
 # Rebuild and restart. Use run.sh, not a bare `podman run` — it passes
-# --env-file and mounts the browser profile read-only at
-# /app/browser-profile. A hand-written `podman run` omits both, and the
-# container silently starts unauthenticated: StockNear data degrades to
-# cache and contract-history sync fails every contract.
+# --env-file (STOCKNEAR_MCP_TOKEN lives there) and mounts the browser
+# profile read-only at /app/browser-profile. Without the env file the MCP
+# calls fail and symbol-level StockNear data degrades to cache.
 ./run.sh build
 ./run.sh restart          # forced recreate, picks up the new image
 ./run.sh logs
@@ -89,7 +88,10 @@ project name in `pyproject.toml`.
 | `app/services/exit_conditions.py` | Scenario Lab builders: target-price conditions, spot x time P&L matrix, IV selection |
 | `app/routers/scenario_lab.py` | `GET /api/risk/scenario-lab` — per-position holistic analysis |
 | `app/services/price_service.py` | Yahoo Finance API client with caching |
-| `app/services/stocknear_mcp.py` | StockNear MCP client: options overview, max pain, stock quote, expirations |
+| `app/services/stocknear_mcp.py` | StockNear MCP client: options overview, max pain, stock quote, expirations, strikes, OI-only chain |
+| `app/services/stocknear_contract_api.py` | StockNear contract JSON API over httpx: per-contract quotes and full history |
+| `app/services/contract_history.py` | Contract history: JSON parsing, served-contract check, upsert, sync |
+| `app/stocknear.py` | StockNear CLI (`python -m app.stocknear`) and historical model re-exports |
 | `templates/base.html` | Base template with nav, styles |
 | `templates/dashboard.html` | Main dashboard with stats and charts |
 | `templates/positions.html` | Position list with filters |
@@ -111,8 +113,8 @@ project name in `pyproject.toml`.
 
 ## Dependencies
 
-Managed via `uv` — see `pyproject.toml` for the full pinned set, `uv.lock`
-for the resolved tree. Sync with `uv sync --extra dev`.
+Managed via `uv` on Python 3.13 (`.python-version`) — see `pyproject.toml`
+for the full pinned set, `uv.lock` for the resolved tree. Sync with `uv sync --extra dev`.
 
 Core dependencies:
 - `fastapi` + `uvicorn` - Web framework
@@ -122,10 +124,13 @@ Core dependencies:
 - `httpx` - Async HTTP client (Yahoo Finance, with retry)
 - `jinja2` - Templates
 - `python-multipart` - File uploads
-- `playwright` - StockNear contract-quote scraper (Firefox, persistent context).
-  Symbol-level data comes from the StockNear MCP server over httpx instead —
-  see `app/services/stocknear_mcp.py`. The MCP server has no bid/ask or
-  greeks for an arbitrary strike, which is why the scraper still exists.
+- No browser automation. StockNear data is plain HTTP: symbol-level data
+  and strikes from the MCP server (`app/services/stocknear_mcp.py`),
+  per-contract quotes and full history from the contract JSON API
+  (`app/services/stocknear_contract_api.py`), with profile cookies sent
+  when available. Playwright was removed on 2026-09-24; do not add
+  scraping back. `sqlalchemy[asyncio]` pins `greenlet`, which the async
+  engine needs — Playwright used to pull it in implicitly.
 - `scipy` - Probability functions (norm.ppf)
 - `yfinance` - Options chains fallback
 
@@ -139,3 +144,12 @@ uv run pytest          # all tests
 uv run pytest -v       # verbose
 uv run pytest tests/test_risk_math.py  # single file
 ```
+
+Type-check the application code (kept at zero errors):
+
+```bash
+uv run mypy app
+```
+
+`tests/` is not type-checked: the suite deliberately passes lightweight
+stand-ins for ORM models (see `tests/conftest.py`), which mypy rejects.

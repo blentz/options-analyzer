@@ -20,7 +20,7 @@ A web application for analyzing options trading performance from Fidelity accoun
 
 ## Tech Stack
 
-- **Backend**: Python 3.12, FastAPI, SQLAlchemy (async), aiosqlite
+- **Backend**: Python 3.13, FastAPI, SQLAlchemy (async), aiosqlite
 - **Frontend**: Jinja2 templates, Bokeh charts
 - **Data**: SQLite database (WAL mode, foreign keys ON)
 - **Deployment**: Podman container
@@ -70,7 +70,7 @@ Configuration is **passed in at runtime, never baked into the image**.
 | Mount | Mode | Purpose |
 |---|---|---|
 | `./data` → `/app/data` | read-write | SQLite database, persisted across rebuilds |
-| browser profile → `/app/browser-profile` | **read-only** | `cookies.sqlite`, for the authenticated StockNear scraper |
+| browser profile → `/app/browser-profile` | **read-only** | optional `cookies.sqlite`, sent with StockNear contract quote and history requests |
 
 The profile is mounted read-only: the cookie reader copies `cookies.sqlite`
 to a temporary directory before opening it, so it never needs write access
@@ -88,17 +88,17 @@ profile directory on the host to `container_file_t` with per-container MCS
 categories, and that change persists after the container exits — `:ro`
 constrains the container's writes, not podman's relabelling of the source.
 Without it the mount is unreadable under enforcing SELinux and fails
-quietly: the reader reports no cookies found and every sync fails
-authentication, which looks identical to an expired session. Firefox runs
-unconfined and keeps access to the relabelled profile. To undo:
+quietly: the reader reports no cookies found and contract requests go
+unauthenticated. Firefox runs unconfined and keeps access to the
+relabelled profile. To undo:
 
 ```bash
 restorecon -R ~/.mozilla/firefox/<profile>
 ```
 
-Starting without `.env` or without a profile works, but the app runs
-degraded — it warns on startup, StockNear data falls back to cache, and
-contract-history sync fails to authenticate.
+Starting without a profile works: contract quotes and history are fetched
+without cookies. Starting without `.env` runs degraded — there is no
+`STOCKNEAR_MCP_TOKEN`, so symbol-level StockNear data falls back to cache.
 
 Running the app directly instead (`uv run uvicorn app.main:app --reload`)
 requires `DATABASE_PATH` and `STOCKNEAR_BROWSER_PROFILE_PATH` in `.env` to

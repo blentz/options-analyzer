@@ -1,9 +1,9 @@
 """StockNear MCP client.
 
 Symbol-level market data (options overview, max pain, stock quote,
-expirations) comes from StockNear's MCP server rather than the Playwright
-scraper. Contract-level quotes still require the scraper — the MCP server
-exposes no bid, ask, or greeks for an arbitrary strike.
+expirations, the strike list) comes from StockNear's MCP server. The MCP
+server exposes no bid, ask, or greeks for an arbitrary strike; those come
+from StockNear's contract JSON API instead (see stocknear_contract_api).
 
 The server is stateless: `tools/call` succeeds cold, with no `initialize`
 handshake and no session header. Responses are plain JSON, not SSE, and the
@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.stocknear_models import OptionsData, StockData
+from app.stocknear_models import OptionContract, OptionsChain, OptionsData, StockData
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class StockNearMCPNoData(StockNearMCPError):
     """
 
 
-# Ceiling on simultaneous in-flight MCP requests. The Playwright path this
+# Ceiling on simultaneous in-flight MCP requests. The Playwright path that
 # replaced was serialised by a semaphore of 1 because parallel Firefox
 # instances fought for memory; sub-second HTTP calls do not need a bound
 # that tight. They do need one, though — StockNear publishes no rate limit,
@@ -166,7 +166,7 @@ def _plausible_iv_rank(iv_rank: float | None, iv_high: float | None) -> float | 
     return iv_rank
 
 
-def _select_max_pain(table: list[dict], today: date) -> float | None:
+def _select_max_pain(table: list[dict] | None, today: date) -> float | None:
     """Pick the max pain strike from the nearest expiry that still has one.
 
     Rows whose `maxPain` is 0 mean the server has no figure for that expiry,
@@ -201,8 +201,10 @@ async def fetch_options_overview(symbol: str) -> OptionsData:
     """Symbol-level options statistics: IV, HV, put/call ratio, volume, OI."""
     symbol = symbol.upper()
     payload = await call_tool("get_ticker_options_overview_data", {"tickers": [symbol]})
-    data = _require_symbol(payload, symbol, "get_ticker_options_overview_data")
+    return _options_data(symbol, _require_symbol(payload, symbol, "get_ticker_options_overview_data"))
 
+
+def _options_data(symbol: str, data: dict) -> OptionsData:
     overview = data.get("overview") or {}
     volatility = data.get("impliedVolatility") or {}
 
@@ -248,8 +250,10 @@ async def fetch_expirations(symbol: str) -> list[str]:
     """
     symbol = symbol.upper()
     payload = await call_tool("get_ticker_options_overview_data", {"tickers": [symbol]})
-    data = _require_symbol(payload, symbol, "get_ticker_options_overview_data")
+    return _expirations(_require_symbol(payload, symbol, "get_ticker_options_overview_data"))
 
+
+def _expirations(data: dict) -> list[str]:
     today = date.today()
     expirations = set()
     for row in data.get("table") or []:
@@ -263,3 +267,78 @@ async def fetch_expirations(symbol: str) -> list[str]:
             logger.debug("Skipping unparseable expiration %r", expiration)
 
     return sorted(expirations)
+
+
+def _is_current(expiry: str | None) -> bool:
+    try:
+        return expiry is not None and date.fromisoformat(expiry) >= date.today()
+    except ValueError:
+        return False
+
+
+async def _strike_rows(symbol: str) -> list[dict]:
+    """Per-(strike, expiry) open-interest rows for current expiries."""
+    tool = "get_ticker_open_interest_by_strike_and_expiry"
+    payload = await call_tool(tool, {"tickers": [symbol]})
+    if not isinstance(payload, dict):
+        raise StockNearMCPNoData(f"{tool} returned no data for {symbol}")
+    rows = (payload.get("strike-data") or {}).get(symbol)
+    if not rows:
+        raise StockNearMCPNoData(f"{tool} returned no data for {symbol}")
+    return [r for r in rows if _is_current(r.get("expiry")) and r.get("strike") is not None]
+
+
+async def fetch_strikes(symbol: str) -> dict:
+    """Listed strikes and expiries, from open interest by strike.
+
+    Only strikes carrying open interest appear. That is every strike worth
+    trading in practice, but a freshly listed strike with zero OI is absent.
+    """
+    symbol = symbol.upper()
+    rows = await _strike_rows(symbol)
+    return {
+        "strikes": sorted({float(r["strike"]) for r in rows}),
+        "expirations": sorted({r["expiry"] for r in rows}),
+    }
+
+
+async def fetch_options_chain(symbol: str) -> OptionsChain:
+    """Options chain from two MCP calls: the overview and OI by strike.
+
+    Contracts carry open interest only. The MCP server has no per-contract
+    bid, ask, IV, or greeks — callers that need a price use the contract
+    quote API. A side with zero OI is not listed as a contract.
+    """
+    symbol = symbol.upper()
+    overview_payload, rows = await asyncio.gather(
+        call_tool("get_ticker_options_overview_data", {"tickers": [symbol]}),
+        _strike_rows(symbol),
+    )
+    data = _require_symbol(overview_payload, symbol, "get_ticker_options_overview_data")
+    stats = _options_data(symbol, data)
+
+    contracts = []
+    for r in rows:
+        for option_type, key in (("CALL", "call_oi"), ("PUT", "put_oi")):
+            oi = r.get(key) or 0
+            if oi > 0:
+                contracts.append(OptionContract(
+                    strike=float(r["strike"]),
+                    option_type=option_type,
+                    expiration=r["expiry"],
+                    open_interest=int(oi),
+                ))
+
+    return OptionsChain(
+        symbol=symbol,
+        expirations=_expirations(data),
+        contracts=sorted(contracts, key=lambda c: (c.expiration, c.strike, c.option_type)),
+        iv_rank=stats.iv_rank,
+        iv_percentile=stats.iv_percentile,
+        implied_volatility=stats.implied_volatility,
+        put_call_ratio=stats.put_call_ratio,
+        total_volume=stats.total_volume,
+        total_open_interest=stats.total_open_interest,
+        max_pain=stats.max_pain,
+        raw_content=stats.raw_content,
+    )

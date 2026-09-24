@@ -1,5 +1,7 @@
 """Database configuration and session management."""
 
+from collections.abc import AsyncIterator
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -49,7 +51,7 @@ async def init_db():
         await conn.execute(text("PRAGMA foreign_keys=ON"))
 
 
-async def get_db() -> AsyncSession:
+async def get_db() -> AsyncIterator[AsyncSession]:
     """Dependency for getting database sessions."""
     async with async_session() as session:
         yield session

@@ -44,7 +44,7 @@ class SpotPathRow:
 @dataclass
 class HoldRow:
     spot: float
-    move_pct: float
+    move_pct: Optional[float]
     days_left: Optional[int]  # None: never reaches target by expiry
     date: Optional[date]
 

@@ -119,7 +119,7 @@ def calculate_option_price(
     option_type: str,
     spot: float,
     strike: float,
-    days_to_expiry: int,
+    days_to_expiry: float,
     volatility: float = DEFAULT_VOLATILITY,
     risk_free_rate: float = DEFAULT_RISK_FREE_RATE
 ) -> float:

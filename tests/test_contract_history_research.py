@@ -10,7 +10,6 @@ explicitly rather than leaving it implied.
 
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -22,7 +21,7 @@ from app.models import (
 )
 from app.services.contract_history import ContractRef, sync_contract_history
 
-FIXTURE = Path(__file__).parent / "fixtures" / "contract_history" / "HITI261016P00002500.csv"
+from tests.history_fixture import FIXTURE_ROWS, fixture_fetcher
 
 
 @pytest_asyncio.fixture
@@ -52,10 +51,6 @@ async def _held(db, symbol="HITI", strike="2.50"):
     return c
 
 
-def _downloader(symbol, occ, dest_dir):
-    return FIXTURE
-
-
 @pytest.mark.asyncio
 async def test_researched_contract_is_created_and_synced(db):
     """A leg the user does not hold still gets history."""
@@ -63,7 +58,7 @@ async def test_researched_contract_is_created_and_synced(db):
     ref = ContractRef(symbol="AAPL", expiration=date(2026, 12, 18),
                       strike=Decimal("200.00"), option_type="CALL")
 
-    summary = await sync_contract_history(db, extra=[ref], downloader=_downloader)
+    summary = await sync_contract_history(db, extra=[ref], fetcher=fixture_fetcher)
 
     assert summary.synced == 1
     assert summary.failed == 0
@@ -77,7 +72,7 @@ async def test_researched_contract_is_created_and_synced(db):
         select(func.count()).select_from(ContractHistory)
         .where(ContractHistory.contract_id == created.id)
     )).scalar()
-    assert rows == 124
+    assert rows == FIXTURE_ROWS
 
 
 @pytest.mark.asyncio
@@ -87,7 +82,7 @@ async def test_researched_contract_creates_no_position(db):
     ref = ContractRef(symbol="AAPL", expiration=date(2026, 12, 18),
                       strike=Decimal("200.00"), option_type="CALL")
 
-    await sync_contract_history(db, extra=[ref], downloader=_downloader)
+    await sync_contract_history(db, extra=[ref], fetcher=fixture_fetcher)
 
     positions = (await db.execute(select(func.count()).select_from(OptionPosition))).scalar()
     assert positions == 0
@@ -101,7 +96,7 @@ async def test_existing_contract_is_reused_not_duplicated(db):
     ref = ContractRef(symbol="HITI", expiration=date(2026, 10, 16),
                       strike=Decimal("2.50"), option_type="PUT")
 
-    summary = await sync_contract_history(db, extra=[ref], downloader=_downloader)
+    summary = await sync_contract_history(db, extra=[ref], fetcher=fixture_fetcher)
 
     contracts = (await db.execute(select(func.count()).select_from(OptionContract))).scalar()
     assert contracts == 1
@@ -120,7 +115,7 @@ async def test_held_and_researched_are_unioned(db):
     ref = ContractRef(symbol="AAPL", expiration=date(2026, 12, 18),
                       strike=Decimal("200.00"), option_type="CALL")
 
-    summary = await sync_contract_history(db, extra=[ref], downloader=_downloader)
+    summary = await sync_contract_history(db, extra=[ref], fetcher=fixture_fetcher)
 
     assert summary.contracts_total == 2
     assert summary.synced == 2
@@ -132,7 +127,7 @@ async def test_no_extra_still_syncs_open_positions(db):
     await _held(db)
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_downloader)
+    summary = await sync_contract_history(db, fetcher=fixture_fetcher)
 
     assert summary.contracts_total == 1
     assert summary.synced == 1
@@ -146,7 +141,7 @@ async def test_unbuildable_researched_contract_fails_alone(db):
     bad = ContractRef(symbol="BRK.B", expiration=date(2026, 12, 18),
                       strike=Decimal("200.00"), option_type="CALL")
 
-    summary = await sync_contract_history(db, extra=[bad], downloader=_downloader)
+    summary = await sync_contract_history(db, extra=[bad], fetcher=fixture_fetcher)
 
     assert summary.synced == 1
     assert summary.failed == 1

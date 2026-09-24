@@ -69,6 +69,7 @@
 
     const state = {
         symbolData: null,
+        strikes: [],  // listed strikes for the symbol, ascending (MCP, OI > 0)
         legCounter: 0,
         quoteCache: new Map(),
         analysisData: null,
@@ -125,10 +126,24 @@
         return d.toISOString().split('T')[0];
     }
 
+    // Strike `steps` listed strikes away from the one nearest the current
+    // price. Templates express spread width in steps: a 1-dollar grid around
+    // Math.round(price) produced unlisted strikes (HITI at $2.69 -> $3 when
+    // only 2.5/5/7.5 exist). Falls back to that grid if the strike list is
+    // unavailable, with a step of $5 to match the old template offsets.
+    function strikeNear(steps = 0) {
+        const price = state.symbolData ? state.symbolData.current_price : 100;
+        const list = state.strikes;
+        if (!list.length) return Math.round(price) + steps * 5;
+        let atm = 0;
+        list.forEach((k, i) => { if (Math.abs(k - price) < Math.abs(list[atm] - price)) atm = i; });
+        return list[Math.max(0, Math.min(list.length - 1, atm + steps))];
+    }
+
     function buildLegHtml(legId, config = {}) {
         const action  = config.action || 'BUY';
         const type    = config.type   || 'CALL';
-        const strike  = config.strike || (state.symbolData ? Math.round(state.symbolData.current_price) : 100);
+        const strike  = config.strike || strikeNear(0);
         const premium = config.premium || 0;
 
         return `
@@ -181,16 +196,14 @@
             const symbol = input.value.trim().toUpperCase();
             if (!symbol) { showError('lookup-result', 'Please enter a symbol'); return; }
 
-            // Live elapsed-time progress. The scrape can take 10-30s on a
-            // cold symbol; without a ticking counter users assume the page
-            // is broken and reload (which makes things worse).
+            // Live elapsed-time progress. MCP lookups normally take about a
+            // second; the counter shows something is happening if it stalls.
             const started = Date.now();
             const el = document.getElementById('lookup-result');
             const tick = () => {
                 const elapsed = Math.floor((Date.now() - started) / 1000);
                 let hint = '';
-                if (elapsed > 25) hint = ' — still working, this is the cold-start cost';
-                else if (elapsed > 10) hint = ' — scraping StockNear (10-30s typical)';
+                if (elapsed > 10) hint = ' — StockNear is slow to respond';
                 if (el) {
                     el.innerHTML = `<span class="loading-indicator">Looking up ${symbol}... ${elapsed}s${hint}</span>`;
                     el.style.display = 'block';
@@ -208,6 +221,11 @@
 
                 state.symbolData = data;
                 state.quoteCache.clear();
+                state.strikes = [];
+                try {
+                    const sr = await fetch(`/api/speculation/strikes?symbol=${encodeURIComponent(symbol)}`);
+                    if (sr.ok) state.strikes = (await sr.json()).strikes || [];
+                } catch { /* fall back to the price grid in strikeNear */ }
                 showSuccess('lookup-result', `Found ${symbol} - ${formatCurrency(data.current_price)}`);
 
                 document.getElementById('current-price').textContent = formatCurrency(data.current_price);
@@ -362,10 +380,10 @@
             const tid = document.getElementById('strategy-template').value;
             if (!tid || !STRATEGY_TEMPLATES[tid]) return;
             const tpl = STRATEGY_TEMPLATES[tid];
-            const baseStrike = state.symbolData ? Math.round(state.symbolData.current_price) : 100;
             document.getElementById('legs-container').innerHTML = '';
             state.legCounter = 0;
-            tpl.forEach(d => this.addLeg({action: d.action, type: d.type, strike: baseStrike + d.offset}));
+            // Template offsets are in $5 units -> listed-strike steps.
+            tpl.forEach(d => this.addLeg({action: d.action, type: d.type, strike: strikeNear(Math.round(d.offset / 5))}));
             setTimeout(() => this.fetchAllQuotes(), 200);
         },
 
@@ -404,7 +422,7 @@
             // textContent throughout — error strings embed the URL the remote
             // site redirected to, so they are not ours to trust as markup.
             out.replaceChildren(coloredSpan(
-                `Syncing ${legs.length} contract${legs.length === 1 ? '' : 's'} plus open positions — this can take a minute…`,
+                `Syncing ${legs.length} contract${legs.length === 1 ? '' : 's'} plus open positions…`,
                 '#888'));
             try {
                 const res = await fetch('/api/contract-history/sync', {

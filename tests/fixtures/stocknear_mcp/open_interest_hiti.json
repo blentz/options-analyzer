@@ -1,0 +1,90 @@
+{
+  "expiry-data": {
+    "HITI": [
+      {
+        "call_oi": 6986.0,
+        "put_oi": 3852.0,
+        "expiry": "2026-10-16"
+      },
+      {
+        "call_oi": 212.0,
+        "put_oi": 6.0,
+        "expiry": "2026-11-20"
+      },
+      {
+        "call_oi": 7629.0,
+        "put_oi": 1045.0,
+        "expiry": "2027-01-15"
+      },
+      {
+        "call_oi": 8543.0,
+        "put_oi": 277.0,
+        "expiry": "2027-04-16"
+      }
+    ]
+  },
+  "strike-data": {
+    "HITI": [
+      {
+        "strike": 2.5,
+        "call_oi": 4986.0,
+        "put_oi": 3852.0,
+        "expiry": "2026-10-16"
+      },
+      {
+        "strike": 5.0,
+        "call_oi": 1655.0,
+        "put_oi": 0,
+        "expiry": "2026-10-16"
+      },
+      {
+        "strike": 7.5,
+        "call_oi": 345.0,
+        "put_oi": 0,
+        "expiry": "2026-10-16"
+      },
+      {
+        "strike": 2.5,
+        "call_oi": 6943.0,
+        "put_oi": 1045.0,
+        "expiry": "2027-01-15"
+      },
+      {
+        "strike": 5.0,
+        "call_oi": 570.0,
+        "put_oi": 0,
+        "expiry": "2027-01-15"
+      },
+      {
+        "strike": 7.5,
+        "call_oi": 116.0,
+        "put_oi": 0,
+        "expiry": "2027-01-15"
+      },
+      {
+        "strike": 2.5,
+        "call_oi": 7032.0,
+        "put_oi": 277.0,
+        "expiry": "2027-04-16"
+      },
+      {
+        "strike": 5.0,
+        "call_oi": 1507.0,
+        "put_oi": 0,
+        "expiry": "2027-04-16"
+      },
+      {
+        "strike": 7.5,
+        "call_oi": 4.0,
+        "put_oi": 0,
+        "expiry": "2027-04-16"
+      },
+      {
+        "strike": 2.5,
+        "call_oi": 212.0,
+        "put_oi": 6.0,
+        "expiry": "2026-11-20"
+      }
+    ]
+  }
+}

@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from bokeh.plotting import figure
 from bokeh.models import (
     ColumnDataSource, HoverTool, NumeralTickFormatter, DatetimeTickFormatter,
@@ -232,7 +232,7 @@ def create_win_loss_chart(winners: int, losers: int) -> tuple[str, str]:
     from bokeh.plotting import figure
     from math import pi
 
-    data = {
+    data: dict[str, Any] = {
         'category': ['Winners', 'Losers'],
         'value': [winners, losers],
         'color': ['#22c55e', '#ef4444'],

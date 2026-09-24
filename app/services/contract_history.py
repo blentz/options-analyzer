@@ -1,15 +1,17 @@
 """Contract history ingest — parsing, upsert, and sync orchestration.
 
-Deliberately free of Playwright imports so the parsing and upsert logic
-can be tested without a browser. Browser work lives on StockNearScraper;
-see docs/superpowers/specs/2026-08-19-contract-history-download-design.md.
+History comes from StockNear's contract JSON API
+(stocknear_contract_api.fetch_contract_history). It replaced a Playwright
+flow that clicked through the contract-lookup page's Download menu for a
+CSV; the JSON carries the same columns plus bid/ask on days the CSV left
+blank. See docs/superpowers/specs/2026-08-19-contract-history-download-design.md
+for the original design.
 """
 
 import asyncio
-import csv
+import json
 import logging
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
@@ -33,7 +35,7 @@ class HistoryRow:
 
     Field names match the ContractHistory columns. `open_` and `lambda_`
     carry trailing underscores because `open` is a builtin and `lambda` is
-    a keyword; the CSV headers are the bare names.
+    a keyword; the JSON keys are the bare names.
     """
 
     date: date
@@ -81,20 +83,20 @@ class HistoryRow:
     total_premium: Optional[Decimal] = None
 
 
-# CSV header -> HistoryRow field. Anything not listed is ignored, so a new
-# column appearing upstream does not break the parser.
+# JSON key -> HistoryRow field. Anything not listed is ignored, so a new
+# key appearing upstream does not break the parser. `dte` is not sent; it
+# is derived from the payload's expiration.
 _COLUMN_MAP = {
     "open": "open_",
     "high": "high",
     "low": "low",
     "close": "close",
-    "bid": "bid",
-    "ask": "ask",
+    "close_bid": "bid",
+    "close_ask": "ask",
     "mark": "mark",
     "volume": "volume",
     "open_interest": "open_interest",
     "changeOI": "change_oi",
-    "dte": "dte",
     "implied_volatility": "implied_volatility",
     "changesPercentageOI": "changes_percentage_oi",
     "delta": "delta",
@@ -122,96 +124,128 @@ _DECIMAL_FIELDS = {
     "open_", "high", "low", "close", "bid", "ask", "mark",
     "gex", "dex", "total_premium",
 }
-_INT_FIELDS = {"volume", "open_interest", "change_oi", "dte"}
+_INT_FIELDS = {"volume", "open_interest", "change_oi"}
+
+_OCC_PARTS = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 
 
-class ContractHistoryParseError(Exception):
-    """The downloaded file was not a parseable contract-history CSV."""
+class ContractHistoryParseError(ContractHistoryError):
+    """The payload was not a parseable contract history."""
 
 
-def _dec(raw: Optional[str]) -> Optional[Decimal]:
-    if raw is None or raw.strip() == "":
+def _blank(raw) -> bool:
+    return raw is None or (isinstance(raw, str) and raw.strip() == "")
+
+
+def _dec(raw) -> Optional[Decimal]:
+    if _blank(raw):
         return None
     try:
-        return Decimal(raw.strip())
+        # str() first: Decimal(0.3) is 0.2999999999999999888..., the
+        # value the JSON actually carried is "0.3".
+        return Decimal(str(raw).strip())
     except InvalidOperation:
         logger.warning("Could not parse decimal value %r", raw)
         return None
 
 
-def _int(raw: Optional[str]) -> Optional[int]:
-    if raw is None or raw.strip() == "":
+def _int(raw) -> Optional[int]:
+    if _blank(raw):
         return None
     try:
-        # Some counts arrive as "4.0"; int("4.0") raises.
-        cleaned = raw.strip()
-        parsed = float(cleaned)
+        # Some counts arrive as 4.0.
+        parsed = float(raw)
         truncated = int(parsed)
         if parsed != truncated:
-            logger.warning(
-                "Truncating non-integral count value %r to %d",
-                cleaned, truncated
-            )
+            logger.warning("Truncating non-integral count value %r to %d", raw, truncated)
         return truncated
-    except ValueError:
+    except (TypeError, ValueError):
         logger.warning("Could not parse integer value %r", raw)
         return None
 
 
-def _flt(raw: Optional[str]) -> Optional[float]:
-    if raw is None or raw.strip() == "":
+def _flt(raw) -> Optional[float]:
+    if _blank(raw):
         return None
     try:
-        return float(raw.strip())
-    except ValueError:
+        return float(raw)
+    except (TypeError, ValueError):
         logger.warning("Could not parse float value %r", raw)
         return None
 
 
-def parse_history_csv(path: Path) -> list[HistoryRow]:
-    """Parse a Stocknear contract-history CSV into HistoryRow objects.
+def _occ_parts(occ: str) -> tuple[date, Decimal, str]:
+    match = _OCC_PARTS.match(occ)
+    if not match:
+        raise ContractHistoryError(f"Not an OCC symbol: {occ!r}")
+    _, yymmdd, type_char, strike = match.groups()
+    return (
+        datetime.strptime(yymmdd, "%y%m%d").date(),
+        Decimal(strike) / 1000,
+        "put" if type_char == "P" else "call",
+    )
 
-    Empty cells become None, never 0 — the source omits second-order greeks
-    on older rows, and a zero greek is a meaningful value.
+
+def parse_history_json(payload, occ: str) -> list[HistoryRow]:
+    """Parse a contract-history API payload into HistoryRow objects.
+
+    Refuses a payload for a different contract than `occ`: the API echoes
+    the expiration, strike and type it served, and storing another
+    contract's history under this one is the corruption the old page-URL
+    guard existed to prevent. Null values become None, never 0 — the source
+    omits second-order greeks on older rows, and a zero greek is a
+    meaningful value. Rows are returned oldest first, one per date (the
+    last row wins if the source repeats a date).
     """
-    rows: list[HistoryRow] = []
+    if isinstance(payload, list) and not payload:
+        raise ContractHistoryError(f"StockNear has no history for {occ} (unknown contract)")
+    if not isinstance(payload, dict) or not isinstance(payload.get("history"), list):
+        raise ContractHistoryParseError(f"{occ}: payload has no history list")
 
-    with open(path, newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None or "date" not in reader.fieldnames:
-            raise ContractHistoryParseError(
-                f"{path} has no 'date' column; headers={reader.fieldnames}"
-            )
+    expiration, strike, option_type = _occ_parts(occ)
+    try:
+        served = (
+            date.fromisoformat(str(payload.get("expiration"))),
+            Decimal(str(payload.get("strike"))),
+            str(payload.get("optionType")).lower(),
+        )
+    except (ValueError, InvalidOperation):
+        raise ContractHistoryParseError(
+            f"{occ}: payload does not identify its contract "
+            f"(expiration={payload.get('expiration')!r}, strike={payload.get('strike')!r})"
+        )
+    if served != (expiration, strike, option_type):
+        raise ContractHistoryError(
+            f"StockNear served {served[0]} {served[1]} {served[2]} for {occ}; refusing to store it"
+        )
 
-        for lineno, raw_row in enumerate(reader, start=2):
-            raw_date = (raw_row.get("date") or "").strip()
-            if not raw_date:
-                logger.warning("Skipping row %d in %s: empty date", lineno, path)
-                continue
-            try:
-                parsed_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
-            except ValueError:
-                logger.warning(
-                    "Skipping row %d in %s: unparseable date %r", lineno, path, raw_date
-                )
-                continue
+    by_date: dict[date, HistoryRow] = {}
+    for index, raw_row in enumerate(payload["history"]):
+        raw_date = raw_row.get("date") if isinstance(raw_row, dict) else None
+        try:
+            parsed_date = date.fromisoformat(str(raw_date).strip()[:10])
+        except ValueError:
+            logger.warning("Skipping row %d for %s: unparseable date %r", index, occ, raw_date)
+            continue
 
-            values: dict = {"date": parsed_date}
-            for header, field_name in _COLUMN_MAP.items():
-                raw = raw_row.get(header)
-                if field_name in _DECIMAL_FIELDS:
-                    values[field_name] = _dec(raw)
-                elif field_name in _INT_FIELDS:
-                    values[field_name] = _int(raw)
-                else:
-                    values[field_name] = _flt(raw)
+        values: dict = {"date": parsed_date, "dte": (expiration - parsed_date).days}
+        for key, field_name in _COLUMN_MAP.items():
+            raw = raw_row.get(key)
+            if field_name in _DECIMAL_FIELDS:
+                values[field_name] = _dec(raw)
+            elif field_name in _INT_FIELDS:
+                values[field_name] = _int(raw)
+            else:
+                values[field_name] = _flt(raw)
 
-            rows.append(HistoryRow(**values))
+        if parsed_date in by_date:
+            logger.warning("Duplicate date %s for %s; keeping the later row", parsed_date, occ)
+        by_date[parsed_date] = HistoryRow(**values)
 
-    if not rows:
-        raise ContractHistoryParseError(f"{path} contained no parseable rows")
+    if not by_date:
+        raise ContractHistoryParseError(f"{occ}: payload contained no parseable rows")
 
-    return rows
+    return [by_date[d] for d in sorted(by_date)]
 
 
 # Field name on HistoryRow -> attribute on ContractHistory. They are
@@ -290,18 +324,16 @@ _OCC_SYMBOL_PATTERN = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 def occ_symbol(contract: OptionContract) -> str:
-    """Build the OCC symbol Stocknear's contract-lookup URL expects.
+    """Build the OCC symbol StockNear's contract API expects.
 
-    Mirrors StockNearScraper._build_contract_id, reimplemented here rather
-    than imported because that module pulls in Playwright.
+    Must agree with stocknear_contract_api.build_contract_id (tested).
 
     Validates the result against the OCC shape before returning it. This
-    value flows unvalidated into a filesystem path in
-    StockNearScraper.download_contract_history (`dest_dir /
-    f"{occ_symbol}.csv"`) and into a URL query parameter; a symbol
-    containing `/` or `..` could write outside the intended temp
-    directory. occ_symbol() is the sole real producer of this string, so
-    validating here closes that off for every caller.
+    value flows into the API request and into a filesystem path when a
+    failed payload is retained for diagnosis; a symbol containing `/` or
+    `..` could write outside the intended directory. occ_symbol() is the
+    sole real producer of this string, so validating here closes that off
+    for every caller.
     """
     type_char = "P" if contract.option_type.upper() == "PUT" else "C"
     strike_int = int(Decimal(str(contract.strike)) * 1000)
@@ -318,8 +350,8 @@ def occ_symbol(contract: OptionContract) -> str:
     return symbol
 
 
-def _retain_failed_download(path: Path, occ: str) -> Optional[Path]:
-    """Copy a file that failed to parse somewhere it will survive cleanup.
+def _retain_failed_payload(payload, occ: str) -> Optional[Path]:
+    """Save a payload that failed to parse somewhere it can be inspected.
 
     Best-effort: a failure to preserve the evidence must not mask the
     original parse error, so this never raises.
@@ -327,64 +359,29 @@ def _retain_failed_download(path: Path, occ: str) -> Optional[Path]:
     try:
         keep_dir = Path(tempfile.gettempdir()) / "contract-history-failures"
         keep_dir.mkdir(parents=True, exist_ok=True)
-        dest = keep_dir / f"{occ}.csv"
-        shutil.copy(path, dest)
+        dest = keep_dir / f"{occ}.json"
+        dest.write_text(json.dumps(payload, default=str))
         return dest
     except Exception:
-        logger.warning("Could not retain failed download for %s", occ, exc_info=True)
+        logger.warning("Could not retain failed payload for %s", occ, exc_info=True)
         return None
 
 
-def _download_batch(jobs: list[tuple[str, str]], dest_dir: Path) -> dict:
-    """Download every job in ONE browser session. Runs on a worker thread.
+async def _fetch_all(jobs: list[tuple[str, str]], fetcher) -> dict:
+    """Fetch every job concurrently. Returns {occ_symbol: payload | Exception}.
 
-    jobs: list of (underlying_symbol, occ_symbol).
-    Returns {occ_symbol: Path | Exception}.
-
-    No database access happens here: sync_playwright() cannot run on a
-    thread with a running event loop, and the AsyncSession belongs to the
-    loop's thread.
-
-    Deliberately does not use `with StockNearScraper() as scraper:`.
-    `start()` does a real page.goto auth probe, and two things go wrong
-    if it raises inside a `with`: `__exit__` never runs (entry never
-    completed), leaking a Playwright driver process per call; and the
-    exception propagates straight out of this function before `results`
-    is returned, discarding every contract's failure with it and letting
-    the whole batch surface as a bare 500 with nothing recorded anywhere.
+    Failures are recorded per contract; one bad contract never aborts the
+    batch. Concurrency is bounded inside the API client.
     """
-    from app.stocknear import StockNearScraper  # deferred: keeps Playwright
-                                                # out of this module's import
-    results: dict = {}
-    scraper = StockNearScraper()
-    try:
-        scraper.start()
-        for symbol, occ in jobs:
-            try:
-                results[occ] = scraper.download_contract_history(symbol, occ, dest_dir)
-            except Exception as e:  # recorded per contract; batch continues
-                logger.warning("Download failed for %s: %s", occ, e)
-                results[occ] = e
-    except Exception as e:
-        # start() failed (missing Firefox, bad profile path, slow site,
-        # ...) before or during the loop above. Record the real cause
-        # against every due contract that doesn't already have a result,
-        # so a batch-level failure still leaves something for the user to
-        # see and act on, per contract, exactly like a per-contract one.
-        logger.warning("Batch-level scraper failure: %s", e)
-        for _, occ in jobs:
-            results.setdefault(occ, e)
-    finally:
-        # Always attempt teardown, even when start() itself raised.
-        # `results` is fully built by this point, so a raising close()
-        # cannot discard it -- unlike returning from inside a `with`
-        # block, where the return happens only after __exit__ completes.
+    async def one(symbol: str, occ: str):
         try:
-            scraper.close()
-        except Exception:
-            logger.warning("Scraper close() failed after batch", exc_info=True)
+            return await fetcher(symbol, occ)
+        except Exception as e:  # recorded per contract; batch continues
+            logger.warning("History fetch failed for %s: %s", occ, e)
+            return e
 
-    return results
+    results = await asyncio.gather(*(one(symbol, occ) for symbol, occ in jobs))
+    return {occ: result for (_, occ), result in zip(jobs, results)}
 
 
 async def _get_or_create_status(db: AsyncSession, contract_id: int) -> ContractHistorySync:
@@ -462,19 +459,19 @@ async def _get_or_create_contract(db: AsyncSession, ref: ContractRef) -> OptionC
 async def sync_contract_history(
     db: AsyncSession,
     force: bool = False,
-    downloader=None,
+    fetcher=None,
     extra: Optional[list[ContractRef]] = None,
 ) -> SyncSummary:
-    """Download and store history for open positions, plus any named contracts.
+    """Fetch and store history for open positions, plus any named contracts.
 
     extra: contracts named by parts rather than by id — typically the legs
         currently loaded in the speculation strategy builder. Rows are
         created for any that do not exist yet. Contracts that are both held
         and named appear once, not twice.
 
-    downloader: optional callable (symbol, occ_symbol, dest_dir) -> Path,
-        used per contract instead of a real browser session. Tests inject
-        this; production leaves it None.
+    fetcher: optional async callable (symbol, occ_symbol) -> payload, used
+        per contract instead of the StockNear API. Tests inject this;
+        production leaves it None.
     """
     stmt = (
         select(OptionContract)
@@ -523,140 +520,134 @@ async def sync_contract_history(
     if not due:
         return summary
 
-    with tempfile.TemporaryDirectory(prefix="contract-history-") as tmpdir:
-        dest_dir = Path(tmpdir)
 
-        # Resolve each due contract's identity into plain values now,
-        # before any commit/rollback happens. A mid-loop rollback expires
-        # every object still tracked by the session -- including primary
-        # keys -- and touching an expired attribute outside of an active
-        # await raises MissingGreenlet under the async driver. Plain
-        # (id, symbol, occ) tuples sidestep that entirely: nothing below
-        # ever reads an attribute off a `due` contract again.
-        #
-        # occ_symbol(c) can raise (e.g. a dotted ticker like "BRK.B" does
-        # not fit the OCC shape) -- and does so BEFORE any download is
-        # attempted, so this failure must be isolated per contract just
-        # like a download or parse failure is. A bare list comprehension
-        # here would let one bad symbol raise out of the comprehension and
-        # abort the whole sync call, leaving every other due contract with
-        # nothing recorded -- the same failure shape N1 fixed for a
-        # batch-level browser failure, reintroduced through a different
-        # door. commit()ing this contract's status immediately (rather
-        # than batching it with the loop below) keeps it consistent with
-        # every other per-contract failure path in this function.
-        job_meta: list[tuple[int, str, str]] = []
-        for c in due:
-            try:
-                occ = occ_symbol(c)
-            except Exception as e:
-                contract_label = c.contract_id  # e.g. "BRK.B 10/16/26 $250.00 PUT"
-                status = await _get_or_create_status(db, c.id)
-                status.last_attempt_at = now
-                status.last_error = (
-                    f"Could not build a valid OCC symbol for {contract_label}: "
-                    f"{type(e).__name__}: {e}"
-                )
-                await db.commit()
-                summary.failed += 1
-                summary.errors.append(SyncError(contract=contract_label, error=status.last_error))
-                continue
-            job_meta.append((c.id, c.symbol, occ))
+    # Resolve each due contract's identity into plain values now,
+    # before any commit/rollback happens. A mid-loop rollback expires
+    # every object still tracked by the session -- including primary
+    # keys -- and touching an expired attribute outside of an active
+    # await raises MissingGreenlet under the async driver. Plain
+    # (id, symbol, occ) tuples sidestep that entirely: nothing below
+    # ever reads an attribute off a `due` contract again.
+    #
+    # occ_symbol(c) can raise (e.g. a dotted ticker like "BRK.B" does
+    # not fit the OCC shape) -- and does so BEFORE any download is
+    # attempted, so this failure must be isolated per contract just
+    # like a download or parse failure is. A bare list comprehension
+    # here would let one bad symbol raise out of the comprehension and
+    # abort the whole sync call, leaving every other due contract with
+    # nothing recorded -- the same failure shape N1 fixed for a
+    # batch-level browser failure, reintroduced through a different
+    # door. commit()ing this contract's status immediately (rather
+    # than batching it with the loop below) keeps it consistent with
+    # every other per-contract failure path in this function.
+    job_meta: list[tuple[int, str, str]] = []
+    for c in due:
+        try:
+            occ = occ_symbol(c)
+        except Exception as e:
+            contract_label = c.contract_id  # e.g. "BRK.B 10/16/26 $250.00 PUT"
+            status = await _get_or_create_status(db, c.id)
+            status.last_attempt_at = now
+            status.last_error = (
+                f"Could not build a valid OCC symbol for {contract_label}: "
+                f"{type(e).__name__}: {e}"
+            )
+            await db.commit()
+            summary.failed += 1
+            summary.errors.append(SyncError(contract=contract_label, error=status.last_error))
+            continue
+        job_meta.append((c.id, c.symbol, occ))
 
-        if not job_meta:
-            # Every due contract failed symbol construction -- nothing
-            # left to download. Skip the (otherwise wasted) browser launch.
-            return summary
+    if not job_meta:
+        # Every due contract failed symbol construction -- nothing
+        # left to fetch.
+        return summary
 
-        jobs = [(symbol, occ) for _, symbol, occ in job_meta]
+    jobs = [(symbol, occ) for _, symbol, occ in job_meta]
 
-        if downloader is None:
-            downloaded = await asyncio.to_thread(_download_batch, jobs, dest_dir)
-        else:
-            downloaded = {}
-            for symbol, occ in jobs:
-                try:
-                    downloaded[occ] = downloader(symbol, occ, dest_dir)
-                except Exception as e:
-                    downloaded[occ] = e
+    if fetcher is None:
+        from app.services.stocknear_contract_api import fetch_contract_history
+        fetcher = fetch_contract_history
+    downloaded = await _fetch_all(jobs, fetcher)
 
-        # Each contract commits (or rolls back) its own transaction. A
-        # batch-wide atomic commit is incompatible with per-contract
-        # isolation: upsert_history only db.add()s and never flushes, so
-        # an IntegrityError from the (contract_id, date) unique index
-        # would otherwise surface later via autoflush -- misattributed to
-        # whichever contract queries the session next -- and poison the
-        # session so the final commit raises, discarding every contract's
-        # successful writes along with it. Flushing inside each contract's
-        # own try/except, and rolling back before touching the session
-        # again, keeps one bad download from taking down the batch.
-        #
-        # The pre-fetched `statuses` dict is not reused here: any status
-        # object cached there may have been expired (or, if newly added
-        # and never persisted, discarded outright) by an earlier
-        # iteration's rollback. `_get_or_create_status` re-queries fresh
-        # every time, which is the only way to avoid working with a stale
-        # or invalid object after a rollback anywhere earlier in the loop.
-        for contract_id, symbol, occ in job_meta:
+    # Each contract commits (or rolls back) its own transaction. A
+    # batch-wide atomic commit is incompatible with per-contract
+    # isolation: upsert_history only db.add()s and never flushes, so
+    # an IntegrityError from the (contract_id, date) unique index
+    # would otherwise surface later via autoflush -- misattributed to
+    # whichever contract queries the session next -- and poison the
+    # session so the final commit raises, discarding every contract's
+    # successful writes along with it. Flushing inside each contract's
+    # own try/except, and rolling back before touching the session
+    # again, keeps one bad download from taking down the batch.
+    #
+    # The pre-fetched `statuses` dict is not reused here: any status
+    # object cached there may have been expired (or, if newly added
+    # and never persisted, discarded outright) by an earlier
+    # iteration's rollback. `_get_or_create_status` re-queries fresh
+    # every time, which is the only way to avoid working with a stale
+    # or invalid object after a rollback anywhere earlier in the loop.
+    for contract_id, symbol, occ in job_meta:
+        status = await _get_or_create_status(db, contract_id)
+        status.last_attempt_at = now
+
+        result = downloaded.get(occ)
+        if isinstance(result, Exception) or result is None:
+            # Same shape as the parse-failure branch below
+            # (type name + message) -- str(e) alone renders as an
+            # empty string for an exception constructed with no args.
+            message = (
+                f"{type(result).__name__}: {result}"
+                if result is not None
+                else "no payload returned"
+            )
+            status.last_error = message
+            await db.commit()
+            summary.failed += 1
+            summary.errors.append(SyncError(contract=occ, error=message))
+            continue
+
+        try:
+            rows = parse_history_json(result, occ)
+            written = await upsert_history(db, contract_id, rows)
+            # Surface constraint violations HERE, attributed to this
+            # contract, rather than letting them wait for the next
+            # contract's autoflush.
+            await db.flush()
+        except Exception as e:
+            # Save the payload first — a malformed response is exactly
+            # what you need in hand to diagnose a parser failure, and it
+            # is unreproducible once discarded.
+            # An empty list is StockNear's "unknown contract" answer; there
+            # is nothing in it to diagnose.
+            kept = _retain_failed_payload(result, occ) if result != [] else None
+            if result == []:
+                logger.warning("No history for %s: StockNear does not know the contract", occ)
+            else:
+                logger.exception("Parse/upsert failed for %s (kept at %s)", occ, kept)
+            # The session is unusable until rolled back, and the
+            # rollback discards `status` if it was newly added this
+            # transaction (never persisted) or expires it otherwise --
+            # so it must be re-fetched (or re-created) rather than
+            # reused.
+            await db.rollback()
             status = await _get_or_create_status(db, contract_id)
             status.last_attempt_at = now
-
-            result = downloaded.get(occ)
-            if isinstance(result, Exception) or result is None:
-                # Same shape as the parse-failure branch below
-                # (type name + message) -- str(e) alone renders as an
-                # empty string for an exception constructed with no args.
-                message = (
-                    f"{type(result).__name__}: {result}"
-                    if result is not None
-                    else "no download produced"
-                )
-                status.last_error = message
-                await db.commit()
-                summary.failed += 1
-                summary.errors.append(SyncError(contract=occ, error=message))
-                continue
-
-            try:
-                rows = parse_history_csv(result)
-                written = await upsert_history(db, contract_id, rows)
-                # Surface constraint violations HERE, attributed to this
-                # contract, rather than letting them wait for the next
-                # contract's autoflush.
-                await db.flush()
-            except Exception as e:
-                # The enclosing TemporaryDirectory is about to delete the
-                # file, so copy it somewhere durable first — a malformed
-                # download is exactly what you need in hand to diagnose a
-                # parser failure, and it is unreproducible once discarded.
-                kept = _retain_failed_download(result, occ)
-                logger.exception("Parse/upsert failed for %s (kept at %s)", occ, kept)
-                # The session is unusable until rolled back, and the
-                # rollback discards `status` if it was newly added this
-                # transaction (never persisted) or expires it otherwise --
-                # so it must be re-fetched (or re-created) rather than
-                # reused.
-                await db.rollback()
-                status = await _get_or_create_status(db, contract_id)
-                status.last_attempt_at = now
-                status.last_error = f"{type(e).__name__}: {e} (file kept at {kept})"
-                await db.commit()
-                summary.failed += 1
-                # Use status.last_error, not str(e): str(e) for a parse
-                # failure names the temp-directory path, which is about to
-                # be deleted when the enclosing TemporaryDirectory exits.
-                # status.last_error carries the durable
-                # /tmp/contract-history-failures/... path instead, so the
-                # errors[] the endpoint returns points somewhere that
-                # still exists.
-                summary.errors.append(SyncError(contract=occ, error=status.last_error))
-                continue
-
-            status.last_success_at = now
-            status.last_error = None
-            status.row_count = written
+            status.last_error = f"{type(e).__name__}: {e}" + (
+                f" (payload kept at {kept})" if kept else ""
+            )
             await db.commit()
-            summary.synced += 1
-            summary.rows_upserted += written
+            summary.failed += 1
+            # status.last_error, not str(e): it names where the payload
+            # was kept.
+            summary.errors.append(SyncError(contract=occ, error=status.last_error))
+            continue
+
+        status.last_success_at = now
+        status.last_error = None
+        status.row_count = written
+        await db.commit()
+        summary.synced += 1
+        summary.rows_upserted += written
 
     return summary

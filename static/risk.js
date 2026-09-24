@@ -30,7 +30,7 @@ const SPREAD_LABEL = {
 };
 
 const IV_SOURCE_LABEL = {
-    override: 'pinned override', implied_from_mid: 'implied from mid', contract: 'contract (scraped)',
+    override: 'pinned override', implied_from_mid: 'implied from mid', contract: 'contract quote',
     symbol: 'symbol average', default: 'default', manual: 'manual',
 };
 

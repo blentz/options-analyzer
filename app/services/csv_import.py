@@ -396,8 +396,8 @@ def determine_outcome(trades: list[OptionTrade]) -> str:
     return 'OPEN'
 
 
-async def update_position(db: AsyncSession, contract: OptionContract) -> OptionPosition:
-    """Update or create position record for a contract."""
+async def update_position(db: AsyncSession, contract: OptionContract) -> Optional[OptionPosition]:
+    """Update or create position record for a contract. None if it has no trades."""
     from sqlalchemy.orm import selectinload
 
     stmt = select(OptionTrade).where(OptionTrade.contract_id == contract.id).order_by(OptionTrade.trade_date)
@@ -409,9 +409,9 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
 
     total_qty = sum(t.quantity for t in trades)
 
-    total_premium = sum(t.amount for t in trades)
-    total_commission = sum(t.commission for t in trades)
-    total_fees = sum(t.fees for t in trades)
+    total_premium = sum((t.amount for t in trades), Decimal(0))
+    total_commission = sum((t.commission for t in trades), Decimal(0))
+    total_fees = sum((t.fees for t in trades), Decimal(0))
 
     strategy = determine_strategy(trades, contract.option_type)
     outcome = determine_outcome(trades)
@@ -442,11 +442,10 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
     )
 
     # Get or create position
-    stmt = select(OptionPosition).options(
+    position_stmt = select(OptionPosition).options(
         selectinload(OptionPosition.underlying_trades)
     ).where(OptionPosition.contract_id == contract.id)
-    result = await db.execute(stmt)
-    position = result.scalar_one_or_none()
+    position = (await db.execute(position_stmt)).scalar_one_or_none()
 
     open_date = min(t.trade_date for t in trades)
     # For expired positions without explicit closing trade, use expiration date
@@ -503,7 +502,7 @@ async def update_position(db: AsyncSession, contract: OptionContract) -> OptionP
         position.num_contracts = num_contracts
 
         # Calculate underlying P&L from linked trades
-        underlying_pnl = sum(t.amount for t in position.underlying_trades) if position.underlying_trades else Decimal(0)
+        underlying_pnl = sum((t.amount for t in position.underlying_trades), Decimal(0))
         position.underlying_pnl = underlying_pnl
         position.total_pnl = total_premium + underlying_pnl
 
@@ -739,12 +738,11 @@ async def import_csv(db: AsyncSession, content: str, filename: str) -> tuple[int
                 stmt = select(OptionPosition).options(
                     selectinload(OptionPosition.underlying_trades)
                 ).where(OptionPosition.id == position.id)
-                result = await db.execute(stmt)
-                pos = result.scalar_one_or_none()
-                if pos:
-                    underlying_pnl = sum(t.amount for t in pos.underlying_trades) if pos.underlying_trades else Decimal(0)
-                    pos.underlying_pnl = underlying_pnl
-                    pos.total_pnl = pos.net_pnl + underlying_pnl
+                refreshed = (await db.execute(stmt)).scalar_one_or_none()
+                if refreshed:
+                    underlying_pnl = sum((t.amount for t in refreshed.underlying_trades), Decimal(0))
+                    refreshed.underlying_pnl = underlying_pnl
+                    refreshed.total_pnl = refreshed.net_pnl + underlying_pnl
 
     # Log the import
     log = ImportLog(

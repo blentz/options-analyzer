@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Options Trading Analyzer{% endblock %}</title>
-    <script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.6.2.min.js"></script>
+    {# Version comes from the installed bokeh package: a hardcoded CDN version
+       left every chart blank after an upgrade ("unknown property"). #}
+    <script src="https://cdn.bokeh.org/bokeh/release/bokeh-{{ bokeh_version }}.min.js"></script>
     <style>
         * {
             margin: 0;

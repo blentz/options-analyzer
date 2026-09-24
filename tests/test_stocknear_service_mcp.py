@@ -222,3 +222,55 @@ async def test_fresh_cache_is_served_without_a_refetch(monkeypatch, fake_cache):
 
     assert calls == [], "fresh cache must not trigger an upstream call"
     assert result.implied_volatility == pytest.approx(0.30)
+
+
+@pytest.mark.asyncio
+async def test_get_options_chain_uses_mcp_and_caches(monkeypatch, fake_cache):
+    from app.stocknear_models import OptionContract, OptionsChain
+
+    async def fake_chain(symbol):
+        return OptionsChain(
+            symbol=symbol, expirations=["2026-10-16"], implied_volatility=1.16,
+            contracts=[OptionContract(strike=2.5, option_type="PUT", expiration="2026-10-16", open_interest=3852)],
+        )
+
+    monkeypatch.setattr(stocknear_service, "fetch_options_chain", fake_chain)
+
+    chain = await stocknear_service.get_options_chain(db=None, symbol="hiti")
+
+    assert chain.expirations == ["2026-10-16"]
+    assert chain.get_contract("2026-10-16", 2.5, "PUT").open_interest == 3852
+    assert fake_cache["options_chain:HITI"]["implied_volatility"] == 1.16
+
+
+@pytest.mark.asyncio
+async def test_failed_contract_quote_is_not_cached(monkeypatch, fake_cache):
+    from app.services.stocknear_contract_api import StockNearAPIError
+
+    async def boom(*args):
+        raise StockNearAPIError("403")
+
+    monkeypatch.setattr(stocknear_service, "fetch_contract_quote", boom)
+
+    assert await stocknear_service.get_contract_quote(None, "HITI", "Oct 16, 2026", 2.5, "PUT") is None
+    assert not any(k.startswith("contract_quote:") for k in fake_cache)
+
+
+@pytest.mark.asyncio
+async def test_batch_keeps_a_slot_for_failed_contracts(monkeypatch, fake_cache):
+    from app.stocknear_models import ContractQuote
+
+    async def fake_quotes(contracts):
+        return [None, ContractQuote(symbol="HITI", strike=2.5, option_type="PUT",
+                                    expiration="2026-10-16", contract_id="HITI261016P00002500", mid=0.1)]
+
+    monkeypatch.setattr(stocknear_service, "fetch_contract_quotes", fake_quotes)
+    contracts = [
+        {"symbol": "HITI", "expiration": "2026-10-16", "strike": 5.0, "option_type": "CALL"},
+        {"symbol": "HITI", "expiration": "2026-10-16", "strike": 2.5, "option_type": "PUT"},
+    ]
+
+    quotes = await stocknear_service.get_contract_quotes_batch(None, contracts)
+
+    assert quotes[0] is None and quotes[1].contract_id == "HITI261016P00002500"
+    assert list(k for k in fake_cache if k.startswith("contract_quote:")) == ["contract_quote:HITI:2026-10-16:2.5:PUT"]

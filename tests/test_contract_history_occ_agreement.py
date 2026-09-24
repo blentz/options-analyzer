@@ -1,22 +1,16 @@
-"""Regression test for N6: occ_symbol() (service) and _build_contract_id()
-(scraper) must produce identical OCC symbols for the same contract.
+"""Regression test for N6: occ_symbol() (history sync) and
+build_contract_id() (contract API client) must produce identical OCC
+symbols for the same contract.
 
-_build_contract_id used int(strike * 1000) on a raw float, which truncates
-for strikes like 2.55 (2.55 * 1000 == 2549.9999999999995, so int() gives
-2549 instead of 2550). occ_symbol always routed through Decimal(str(strike))
-and was correct.
+The original builder used int(strike * 1000) on a raw float, which
+truncates for strikes like 2.55 (2.55 * 1000 == 2549.9999999999995, so
+int() gives 2549 instead of 2550). Both now route through
+Decimal(str(strike)).
 
-Why this matters more than ordinary duplication: if the two ever produced
-different symbols, the requested URL and the served page would still
-*agree with each other* — the substitution guard in verify_contract_served
-compares the served contract param against the OCC symbol the caller
-built, and both sides would use the same (wrong) code path consistently.
-The guard would pass while a different contract's history got written
-under the requested contract's id, which is precisely the corruption the
-guard exists to prevent.
-
-Importing app.stocknear pulls in Playwright, but StockNearScraper.__init__
-does not launch a browser, so instantiating it here stays browser-free.
+Why this matters more than ordinary duplication: the history sync checks
+that the payload's expiration/strike/type match the OCC symbol it built.
+If the two builders disagreed, quotes and history would silently refer to
+different contracts while each looked self-consistent.
 """
 
 from datetime import date
@@ -26,7 +20,7 @@ import pytest
 
 from app.models import OptionContract
 from app.services.contract_history import occ_symbol
-from app.stocknear import StockNearScraper
+from app.services.stocknear_contract_api import build_contract_id
 
 
 @pytest.mark.parametrize(
@@ -42,18 +36,15 @@ def test_occ_symbol_agrees_with_build_contract_id(strike):
     )
     service_result = occ_symbol(contract)
 
-    scraper = StockNearScraper()
-    scraper_result = scraper._build_contract_id(
-        "HITI", "2026-10-16", "PUT", float(strike)
-    )
+    api_result = build_contract_id("HITI", "2026-10-16", "PUT", float(strike))
 
-    assert service_result == scraper_result
+    assert service_result == api_result
 
 
 class TestOccSymbolValidation:
-    """N10: occ_symbol() flows unvalidated into a filesystem path in
-    StockNearScraper.download_contract_history (dest_dir / f"{occ_symbol}.csv")
-    and into a URL query parameter. A malformed symbol (e.g. containing '/'
+    """N10: occ_symbol() flows into the API request and into a filesystem
+    path when a failed payload is retained (contract-history-failures/
+    f"{occ_symbol}.json"). A malformed symbol (e.g. containing '/'
     or produced from a ticker longer than the OCC format allows) must be
     rejected at the point it's built, since occ_symbol() is the sole real
     producer of this string for every caller.
@@ -91,8 +82,4 @@ def test_occ_symbol_255_strike_regression():
     )
     assert occ_symbol(contract) == "HITI261016P00002550"
 
-    scraper = StockNearScraper()
-    assert (
-        scraper._build_contract_id("HITI", "2026-10-16", "PUT", 2.55)
-        == "HITI261016P00002550"
-    )
+    assert build_contract_id("HITI", "2026-10-16", "PUT", 2.55) == "HITI261016P00002550"

@@ -21,9 +21,7 @@ class Settings(BaseSettings):
     
     # StockNear configuration
     stocknear_base_url: str = "https://stocknear.com"
-    stocknear_browser_profile_path: str = ""  # Path to LibreWolf/Firefox profile with cookies
-    stocknear_headless: bool = True
-    stocknear_rate_limit_delay: float = 1.0  # Seconds between requests
+    stocknear_browser_profile_path: str = ""  # Optional: Firefox/LibreWolf profile whose cookies are sent to StockNear
     stocknear_cache_ttl_seconds: int = 3600  # 1 hour cache
 
     # Contract-history sync. The source updates once per trading day; 12
@@ -61,7 +59,7 @@ class Settings(BaseSettings):
     # API key required on all routes when set. Leave empty to disable auth
     # (only safe when bound to localhost on a trusted machine).
     api_key: str = ""
-    # Debug endpoints (raw scraped content, screenshots, etc) leak internals
+    # Debug endpoints (raw StockNear payloads, uncached quotes) leak internals
     # and session data. Off by default — set to true only for local dev.
     enable_debug_endpoints: bool = False
     # Logging format: "text" (default, human-readable) or "json" (one JSON

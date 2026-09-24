@@ -1,7 +1,8 @@
-"""Orchestration tests. The downloader is injected, so none of this needs
-a browser.
+"""Orchestration tests. The fetcher is injected, so none of this touches
+the network.
 """
 
+import json
 import tempfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -15,10 +16,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.models import (
     Base, ContractHistory, ContractHistorySync, OptionContract, OptionPosition,
 )
+from app.services import contract_history
 from app.services.contract_history import occ_symbol, sync_contract_history
-from app.stocknear_models import ProGatedError
+from app.services.stocknear_contract_api import StockNearAPIError
 
-FIXTURE = Path(__file__).parent / "fixtures" / "contract_history" / "HITI261016P00002500.csv"
+from tests.history_fixture import FIXTURE_ROWS, fixture_fetcher as _fixture_fetcher, payload_for as _payload_for
+
+
+@pytest.fixture(autouse=True)
+def private_tempdir(monkeypatch, tmp_path):
+    """Keep retained failure payloads out of the real /tmp."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
 
 @pytest_asyncio.fixture
@@ -51,12 +59,8 @@ async def _open_position(db, symbol="HITI", strike="2.50", exp=date(2026, 10, 16
     return c
 
 
-def _fixture_downloader(symbol, occ_symbol, dest_dir):
-    return FIXTURE
-
-
-def _failing_downloader(symbol, occ_symbol, dest_dir):
-    raise ProGatedError(f"{occ_symbol} requires a higher subscription tier")
+async def _failing_fetcher(symbol, occ):
+    raise StockNearAPIError(f"Contract request failed for {occ}: 403 Forbidden")
 
 
 @pytest.mark.asyncio
@@ -64,15 +68,15 @@ async def test_syncs_open_position(db):
     await _open_position(db)
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, fetcher=_fixture_fetcher)
 
     assert summary.contracts_total == 1
     assert summary.synced == 1
     assert summary.failed == 0
-    assert summary.rows_upserted == 124
+    assert summary.rows_upserted == FIXTURE_ROWS
 
     count = (await db.execute(select(func.count()).select_from(ContractHistory))).scalar()
-    assert count == 124
+    assert count == FIXTURE_ROWS
 
 
 @pytest.mark.asyncio
@@ -82,7 +86,7 @@ async def test_skips_closed_positions(db):
     pos.is_closed = True
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, fetcher=_fixture_fetcher)
     assert summary.contracts_total == 0
     assert summary.synced == 0
 
@@ -92,12 +96,12 @@ async def test_records_success_status(db):
     c = await _open_position(db)
     await db.commit()
 
-    await sync_contract_history(db, downloader=_fixture_downloader)
+    await sync_contract_history(db, fetcher=_fixture_fetcher)
 
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
     assert status.last_success_at is not None
     assert status.last_error is None
-    assert status.row_count == 124
+    assert status.row_count == FIXTURE_ROWS
 
 
 @pytest.mark.asyncio
@@ -105,39 +109,39 @@ async def test_records_failure_without_raising(db):
     await _open_position(db)
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_failing_downloader)
+    summary = await sync_contract_history(db, fetcher=_failing_fetcher)
 
     assert summary.failed == 1
     assert summary.synced == 0
     assert len(summary.errors) == 1
-    assert "subscription" in summary.errors[0].error
+    assert "403" in summary.errors[0].error
 
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
     assert status.last_success_at is None
-    assert "subscription" in status.last_error
+    assert "403" in status.last_error
 
 
 @pytest.mark.asyncio
 async def test_download_failure_with_no_message_keeps_exception_type(db):
     """N4: an exception constructed without arguments renders as an empty
-    string via str(e). The download-path branch must use the same
-    "TypeName: message" shape as the parse-failure branch, so a failure
-    like `raise DownloadTimeoutError()` still names the exception type
-    instead of leaving last_error / errors[] blank.
+    string via str(e). The fetch-failure branch must use the same
+    "TypeName: message" shape as the parse-failure branch, so a bare
+    `raise StockNearAPIError()` still names the exception type instead of
+    leaving last_error / errors[] blank.
     """
     await _open_position(db)
     await db.commit()
 
-    def empty_message_downloader(symbol, occ_symbol, dest_dir):
-        raise ProGatedError()
+    async def empty_message_fetcher(symbol, occ):
+        raise StockNearAPIError()
 
-    summary = await sync_contract_history(db, downloader=empty_message_downloader)
+    summary = await sync_contract_history(db, fetcher=empty_message_fetcher)
 
     assert summary.failed == 1
-    assert summary.errors[0].error == "ProGatedError: "
+    assert summary.errors[0].error == "StockNearAPIError: "
 
     status = (await db.execute(select(ContractHistorySync))).scalars().one()
-    assert status.last_error == "ProGatedError: "
+    assert status.last_error == "StockNearAPIError: "
 
 
 @pytest.mark.asyncio
@@ -146,12 +150,12 @@ async def test_one_failure_does_not_abort_batch(db):
     bad = await _open_position(db, strike="5.00")
     await db.commit()
 
-    def mixed(symbol, occ_symbol, dest_dir):
-        if "00005000" in occ_symbol:
-            raise ProGatedError("gated")
-        return FIXTURE
+    async def mixed(symbol, occ):
+        if "00005000" in occ:
+            raise StockNearAPIError("503")
+        return _payload_for(occ)
 
-    summary = await sync_contract_history(db, downloader=mixed)
+    summary = await sync_contract_history(db, fetcher=mixed)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -159,24 +163,17 @@ async def test_one_failure_does_not_abort_batch(db):
 
 
 @pytest.mark.asyncio
-async def test_unparseable_download_is_recorded_and_retained(db):
-    """A malformed CSV must fail that contract, not the batch, and the file
-    must survive for diagnosis.
-
-    The fake downloader writes its junk file into the dest_dir the
-    orchestrator hands it (as a real downloader would), so this exercises
-    the actual "copy before the TemporaryDirectory is cleaned" behavior
-    rather than a file living outside it the whole time.
+async def test_unparseable_payload_is_recorded_and_retained(db):
+    """A malformed payload must fail that contract, not the batch, and the
+    payload must be saved for diagnosis.
     """
     await _open_position(db)
     await db.commit()
 
-    def bad_downloader(symbol, occ, dest_dir):
-        junk = Path(dest_dir) / "junk.csv"
-        junk.write_text("this is not a contract history csv\n")
-        return junk
+    async def bad_fetcher(symbol, occ):
+        return {"message": "this is not a contract history"}
 
-    summary = await sync_contract_history(db, downloader=bad_downloader)
+    summary = await sync_contract_history(db, fetcher=bad_fetcher)
 
     assert summary.failed == 1
     assert summary.synced == 0
@@ -185,22 +182,51 @@ async def test_unparseable_download_is_recorded_and_retained(db):
     assert status.last_success_at is None
     assert "kept at" in status.last_error
 
-    # N5: errors[] must carry the SAME message as last_error -- the
-    # durable /tmp/contract-history-failures/... path -- not str(e), which
-    # names the temp download path that the enclosing TemporaryDirectory
-    # is about to delete. Before the fix, the endpoint's errors[] pointed
-    # a user at a path that no longer existed and never showed them the
-    # one that did.
+    # N5: errors[] carries the same message as last_error, including where
+    # the payload was kept.
     assert summary.errors[0].error == status.last_error
     assert "contract-history-failures" in summary.errors[0].error
 
-    kept = Path(tempfile.gettempdir()) / "contract-history-failures" / "HITI261016P00002500.csv"
-    assert kept.exists()
-    kept.unlink()
+    kept = Path(tempfile.gettempdir()) / "contract-history-failures" / "HITI261016P00002500.json"
+    assert json.loads(kept.read_text()) == {"message": "this is not a contract history"}
 
 
 @pytest.mark.asyncio
-async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, tmp_path):
+async def test_unknown_contract_is_reported_without_a_kept_payload(db):
+    await _open_position(db)
+    await db.commit()
+
+    async def unknown(symbol, occ):
+        return []
+
+    summary = await sync_contract_history(db, fetcher=unknown)
+
+    assert summary.failed == 1
+    assert summary.errors[0].error == (
+        "ContractHistoryError: StockNear has no history for HITI261016P00002500 (unknown contract)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_substituted_contract_is_refused(db):
+    """StockNear answering with a different contract's history must fail
+    that contract and store nothing for it."""
+    await _open_position(db)
+    await db.commit()
+
+    async def wrong_contract(symbol, occ):
+        return _payload_for("HITI261023P00002500")
+
+    summary = await sync_contract_history(db, fetcher=wrong_contract)
+
+    assert summary.failed == 1
+    assert "refusing to store" in summary.errors[0].error
+    count = (await db.execute(select(func.count()).select_from(ContractHistory))).scalar()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, monkeypatch):
     """upsert_history only db.add()s; it never flushes. Without an explicit
     flush inside the per-contract try/except, an IntegrityError from the
     (contract_id, date) unique index surfaces later via autoflush -- on the
@@ -223,23 +249,18 @@ async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, t
     bad_id = bad.id
     bad_occ = occ_symbol(bad)
 
-    header_fields = [
-        "date", "open", "high", "low", "close", "bid", "ask", "mark",
-        "volume", "open_interest", "changeOI", "dte",
-        "implied_volatility", "changesPercentageOI",
-        "delta", "gamma", "theta", "vega", "rho", "epsilon", "lambda",
-        "charm", "vanna", "vomma", "veta", "vera", "speed", "zomma",
-        "color", "ultima", "gex", "dex", "total_premium",
-    ]
-    row_values = ["2026-02-19"] + ["1"] * (len(header_fields) - 1)
-    row = ",".join(row_values)
-    dup_csv = tmp_path / "dup.csv"
-    dup_csv.write_text(",".join(header_fields) + "\n" + row + "\n" + row + "\n")
+    # The parser dedupes dates, so inject the duplicate at upsert time to
+    # exercise the flush-inside-try isolation this test exists for.
+    real_upsert = contract_history.upsert_history
 
-    def mixed(symbol, occ, dest_dir):
-        return dup_csv if symbol == "BBB" else FIXTURE
+    async def duplicating_upsert(db, contract_id, rows):
+        if contract_id == bad_id:
+            rows = rows + rows[:1]
+        return await real_upsert(db, contract_id, rows)
 
-    summary = await sync_contract_history(db, downloader=mixed)
+    monkeypatch.setattr(contract_history, "upsert_history", duplicating_upsert)
+
+    summary = await sync_contract_history(db, fetcher=_fixture_fetcher)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -274,7 +295,7 @@ async def test_duplicate_date_failure_is_isolated_and_does_not_abort_batch(db, t
             .where(ContractHistory.contract_id == good_id)
         )
     ).scalar()
-    assert good_history_count == 124
+    assert good_history_count == FIXTURE_ROWS
 
 
 @pytest.mark.asyncio
@@ -299,13 +320,13 @@ async def test_invalid_symbol_is_isolated_and_does_not_abort_batch(db):
     good_id = good.id
     bad_id = bad.id
 
-    def only_good(symbol, occ_symbol, dest_dir):
-        # The bad contract must never reach the downloader at all -- it
+    async def only_good(symbol, occ):
+        # The bad contract must never reach the fetcher at all -- it
         # fails before job_meta is even built.
         assert symbol == "AAA"
-        return FIXTURE
+        return _payload_for(occ)
 
-    summary = await sync_contract_history(db, downloader=only_good)
+    summary = await sync_contract_history(db, fetcher=only_good)
 
     assert summary.contracts_total == 2
     assert summary.synced == 1
@@ -341,7 +362,7 @@ async def test_invalid_symbol_is_isolated_and_does_not_abort_batch(db):
             .where(ContractHistory.contract_id == good_id)
         )
     ).scalar()
-    assert good_history_count == 124
+    assert good_history_count == FIXTURE_ROWS
 
 
 @pytest.mark.asyncio
@@ -354,7 +375,7 @@ async def test_ttl_skips_recent_sync(db):
     ))
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, fetcher=_fixture_fetcher)
     assert summary.skipped == 1
     assert summary.synced == 0
 
@@ -369,7 +390,7 @@ async def test_force_overrides_ttl(db):
     ))
     await db.commit()
 
-    summary = await sync_contract_history(db, force=True, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, force=True, fetcher=_fixture_fetcher)
     assert summary.skipped == 0
     assert summary.synced == 1
 
@@ -384,6 +405,6 @@ async def test_stale_sync_is_refreshed(db):
     ))
     await db.commit()
 
-    summary = await sync_contract_history(db, downloader=_fixture_downloader)
+    summary = await sync_contract_history(db, fetcher=_fixture_fetcher)
     assert summary.skipped == 0
     assert summary.synced == 1

@@ -37,7 +37,7 @@ def test_sync_endpoint_serializes_summary_and_errors(monkeypatch):
 
     captured = {}
 
-    async def fake_sync_contract_history(db, force=False, downloader=None, extra=None):
+    async def fake_sync_contract_history(db, force=False, fetcher=None, extra=None):
         captured['extra'] = extra
         return summary
 
@@ -83,7 +83,7 @@ def test_sync_endpoint_forwards_speculation_legs(monkeypatch):
 
     captured = {}
 
-    async def fake_sync(db, force=False, downloader=None, extra=None):
+    async def fake_sync(db, force=False, fetcher=None, extra=None):
         captured["extra"] = extra
         return SyncSummary(contracts_total=len(extra or []), synced=len(extra or []))
 
@@ -111,7 +111,7 @@ def test_sync_endpoint_forwards_speculation_legs(monkeypatch):
 
 def test_sync_endpoint_rejects_unusable_leg(monkeypatch):
     """A malformed leg is the caller's error — reject rather than sync a subset."""
-    async def fake_sync(db, force=False, downloader=None, extra=None):
+    async def fake_sync(db, force=False, fetcher=None, extra=None):
         raise AssertionError("service must not be called for an unusable leg")
 
     monkeypatch.setattr("app.services.contract_history.sync_contract_history", fake_sync)
@@ -132,7 +132,7 @@ def test_sync_endpoint_without_body_syncs_open_positions_only(monkeypatch):
     """Positions-page behaviour must survive the signature change."""
     captured = {}
 
-    async def fake_sync(db, force=False, downloader=None, extra=None):
+    async def fake_sync(db, force=False, fetcher=None, extra=None):
         captured["extra"] = extra
         return SyncSummary()
 

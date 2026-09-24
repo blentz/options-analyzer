@@ -1,0 +1,50 @@
+{
+  "HITI": {
+    "overview": {
+      "date": "September 24, 2026",
+      "currentIV": 116.25,
+      "ivRank": 74.81,
+      "putCallRatio": 24.0,
+      "totalVolume": 25,
+      "totalOpenInterest": 28550
+    },
+    "impliedVolatility": {
+      "current": 116.25,
+      "ivRank": 74.81,
+      "ivPercentile": 97.32,
+      "historicalVolatility": 40.9,
+      "ivHigh": 127.86,
+      "ivLow": 81.79
+    },
+    "table": [
+      {
+        "expiration": "2026-10-16",
+        "callOI": 6986.0,
+        "putOI": 3852.0,
+        "avgIV": 116.25,
+        "maxPain": 2.5
+      },
+      {
+        "expiration": "2026-11-20",
+        "callOI": 212.0,
+        "putOI": 6.0,
+        "avgIV": 114.92,
+        "maxPain": 2.5
+      },
+      {
+        "expiration": "2027-01-15",
+        "callOI": 7629.0,
+        "putOI": 1045.0,
+        "avgIV": 82.11,
+        "maxPain": 2.5
+      },
+      {
+        "expiration": "2027-04-16",
+        "callOI": 8543.0,
+        "putOI": 277.0,
+        "avgIV": 78.36,
+        "maxPain": 2.5
+      }
+    ]
+  }
+}
