@@ -70,4 +70,11 @@ USER app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Bind BOTH address families. Rootless podman's pasta forwards host IPv4 and
+# IPv6 into the container regardless of the -p address, and a connection to a
+# family with no listener is reset, not refused. `localhost` resolves to ::1
+# first and a reset gives curl and browsers no reason to retry on 127.0.0.1,
+# so with 0.0.0.0 the app looks down from the host while /health passes
+# inside. "::" alone fails the other way: asyncio sets IPV6_V6ONLY, so IPv4
+# is reset. An empty host makes asyncio open one socket per family.
+CMD ["uvicorn", "app.main:app", "--host", "", "--port", "8000"]
